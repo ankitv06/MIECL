@@ -41,6 +41,8 @@ if __name__ == '__main__':
     parser.add_argument('--contrastive_mode', type=str, default='USER')
     parser.add_argument('--gnn_mode', type=str, default='nogat')
     parser.add_argument('--agg_mode', type=str, default='soft')
+    parser.add_argument('--dataset_dir', type=str, default='dataset')
+    parser.add_argument('--glove_path', type=str, default='dataset/glove.840B.300d.txt')
     args = parser.parse_args()
 
     num_epoch = args.num_epoch
@@ -62,18 +64,23 @@ if __name__ == '__main__':
     contrastive_mode = args.contrastive_mode
     gnn_mode = args.gnn_mode
     agg_mode = args.agg_mode
+    dataset_dir = args.dataset_dir
+    glove_path = args.glove_path
 
     if not os.path.exists(preserve_dir):
         os.makedirs(preserve_dir)
 
-    file1 = 'MINDsmall_train/news.tsv'
-    file2 = 'MINDsmall_dev/news.tsv'
-    file3 = 'MINDsmall_train/behaviors.tsv'
-    file4 = 'MINDsmall_dev/behaviors.tsv'
-    file5 = 'glove/glove.840B.300d.txt'
+    file1 = os.path.join(dataset_dir, 'MINDsmall_train/news.tsv')
+    file2 = os.path.join(dataset_dir, 'MINDsmall_dev/news.tsv')
+    file3 = os.path.join(dataset_dir, 'MINDsmall_train/behaviors.tsv')
+    file4 = os.path.join(dataset_dir, 'MINDsmall_dev/behaviors.tsv')
+    file5 = glove_path
     file6 = 'dummy.txt'
-    #file6 = '/MINDsmall_dev/cold_start_behaviors.tsv' #doesn't exist?
-    #file6 = '/home/wangshicheng/news_recommendation/MINDsmall_dev/normal_behaviors.tsv'
+
+    # Verify files exist
+    for f_path in [file1, file2, file3, file4, file5]:
+        if not os.path.exists(f_path):
+            raise FileNotFoundError(f"Required dataset file not found: {f_path}. Please check your --dataset_dir or --glove_path arguments.")
 
     data_module = DataProcess(file1, file2, file3, file4, file5, file6)
     news_title, news_abstract = data_module.process_train_val_news()
@@ -101,23 +108,13 @@ if __name__ == '__main__':
         print('user_his_echo.size: ', user_his_echo.size())
     # --- End Echo-Chamber Debiasing ---
     
-    model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode)
-    device_ids = [0,1,2,3,4,5,6,7]
-    model = nn.DataParallel(model, device_ids = device_ids)
- 
-    #user_adj = []
-    #f = open('small_user_nei_sort.txt', 'r', encoding='utf-8')
-    #lines = f.readlines()
-    #for line in lines:
-    #    line = line.strip().split('\t')
-    #    user_adj.append([int(i) for i in line])
-    #user_adj = torch.LongTensor(np.array(user_adj, dtype = 'int32'))
-    #print ('user_adj.size: ', user_adj.size())
-    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Running on device:", device)
 
     model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode)
-    device_ids = [0,1,2,3,4,5,6,7]
-    model = nn.DataParallel(model, device_ids = device_ids)
+    model = model.to(device)
+    if torch.cuda.is_available():
+        model = nn.DataParallel(model)
     
     #model.load_state_dict(torch.load('/home/wangshicheng/news_recommendation/Final_edtion/title_abstract_edition/concat_dr0.0_prototype_other_user_nogat_soft_6_3_5_s/model_{}.pkl'.format(i + 1)))
     #model.load_state_dict(torch.load('/home/wangshicheng/news_recommendation/Final_edtion/title_abstract_edition/sgd_other2_10_1_5_l_adam_val_2/model_6.pkl'))
@@ -148,11 +145,11 @@ if __name__ == '__main__':
             # model saved after every epoch
             for step, (train_candidate, train_user, train_label) in enumerate(train_loader):
                 t1 = time.time()
-                candidate_title  = news_title[train_candidate]
-                his_title        = news_title[user_his[train_user]]
-                candidate_title, his_title, train_label = Variable(candidate_title), Variable(his_title), Variable(train_label)
-                candidate_abstract = news_abstract[train_candidate]
-                his_abstract       = news_abstract[user_his[train_user]]
+                candidate_title  = news_title[train_candidate].to(device)
+                his_title        = news_title[user_his[train_user]].to(device)
+                candidate_title, his_title, train_label = Variable(candidate_title), Variable(his_title), Variable(train_label).to(device)
+                candidate_abstract = news_abstract[train_candidate].to(device)
+                his_abstract       = news_abstract[user_his[train_user]].to(device)
                 candidate_abstract, his_abstract = Variable(candidate_abstract), Variable(his_abstract)
 
                 # --- Echo-Chamber Debiasing: fetch pre-computed echo histories for this batch ---
@@ -162,8 +159,8 @@ if __name__ == '__main__':
                 echo_his_title    = None
                 echo_his_abstract = None
                 if infonce_mode == 'echo_chamber_debiased':
-                    echo_his_title    = Variable(news_title[user_his_echo[train_user]])
-                    echo_his_abstract = Variable(news_abstract[user_his_echo[train_user]])
+                    echo_his_title    = Variable(news_title[user_his_echo[train_user]]).to(device)
+                    echo_his_abstract = Variable(news_abstract[user_his_echo[train_user]]).to(device)
                 # --- End Echo-Chamber Debiasing ---
 
                 model.train()
@@ -181,7 +178,7 @@ if __name__ == '__main__':
                     # for echo_chamber_debiased, logits shape is [B*(K-1), 2];
                     # for prototype_self, logits shape is [B, 2].
                     # F.cross_entropy handles both via its built-in mean reduction.
-                    user_infoNCE_labels = torch.zeros(len(user_infoNCE_logits), dtype=torch.long)
+                    user_infoNCE_labels = torch.zeros(len(user_infoNCE_logits), dtype=torch.long, device=device)
                     user_infoNCE_loss   = F.cross_entropy(user_infoNCE_logits, user_infoNCE_labels)
                     print('predictor_loss: ', predictor_loss.data.item(), 'user_infoNCE_loss: ', user_infoNCE_loss.data.item())
                     loss = predictor_loss + alpha * user_infoNCE_loss
@@ -274,10 +271,9 @@ if __name__ == '__main__':
                 #print ('index_of_batch_valdataset: ', i)
 
                 #temp_candidate_title, temp_his_title = news_title[torch.LongTensor(val_candidate[i])].unsqueeze(dim = 1).cuda(), news_title[user_his[torch.LongTensor(val_user[i])]].cuda()
-                candidate_title, his_title = news_title[val_candidate].unsqueeze(dim = 1), news_title[user_his[val_user]]
+                candidate_title, his_title = news_title[val_candidate].unsqueeze(dim = 1).to(device), news_title[user_his[val_user]].to(device)
                 candidate_title, his_title = Variable(candidate_title), Variable(his_title)
-                #temp_candidate_abstract, temp_his_abstract = news_abstract[torch.LongTensor(val_candidate[i])].unsqueeze(dim = 1).cuda(), news_abstract[user_his[torch.LongTensor(val_user[i])]].cuda()
-                candidate_abstract, his_abstract = news_abstract[val_candidate].unsqueeze(dim = 1), news_abstract[user_his[val_user]]
+                candidate_abstract, his_abstract = news_abstract[val_candidate].unsqueeze(dim = 1).to(device), news_abstract[user_his[val_user]].to(device)
                 candidate_abstract, his_abstract = Variable(candidate_abstract), Variable(his_abstract)
                 print (candidate_title.size(), his_title.size(), candidate_abstract.size(), his_abstract.size())
 
