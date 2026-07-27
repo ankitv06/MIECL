@@ -26,7 +26,8 @@ class DataProcess():
         self.news_title_dict = {'0': [0] * 20}  # {'1': [1, 2, ……, 30]}
         self.news_abstract_dict = {'0': [0] * 40}
         self.news_entity_dict = {'0': [0] * 5}
-        self.newsid_topic = {0: 'NULL'}
+        self.newsid_topic = {0: 'NULL'}  # {int_news_id: category_string}
+        self.category_pool = {}             # {category_string: [int_news_ids]} — train articles only, for echo augmentation
         self.entity_news = {}
         self.entity_matrix_dict = {0: np.zeros(100, dtype='float32')}
         self.embedding_dict = {}
@@ -39,6 +40,7 @@ class DataProcess():
         self.train_user_his = []
         self.user_his_pad = {0: [0] * 50, }
         self.user_his_complete = {0: [], }
+        self.user_his_echo_pad = {0: [0] * 50, }  # echo-chamber augmented histories, same shape as user_his_pad
         
         self.val_index = []
         self.val_candidate = []
@@ -65,7 +67,10 @@ class DataProcess():
     # 处理新闻数据
 
     # read and process news from a file containing news data
-    def process_news(self, file):
+    # is_train_file: if True, articles from this file are added to category_pool
+    # (only train articles are used as replacement pool for echo-chamber augmentation,
+    #  dev/test articles are excluded to avoid data leakage)
+    def process_news(self, file, is_train_file=False):
         f = open(file, 'r', encoding='utf-8')
         lines = f.readlines()
         for line in lines:
@@ -75,6 +80,19 @@ class DataProcess():
             if line[0] not in self.news_id:
                 # assigns a new id for the news article incase it does not exist already
                 self.news_id[line[0]] = len(self.news_id)
+
+            # --- Echo-Chamber Debiasing: store category per article ---
+            # line[1] is the category field in MIND news.tsv
+            int_news_id = self.news_id[line[0]]
+            category = line[1].strip()
+            self.newsid_topic[int_news_id] = category
+            # only train articles go into the replacement pool (no data leakage from dev)
+            if is_train_file:
+                if category not in self.category_pool:
+                    self.category_pool[category] = []
+                if int_news_id not in self.category_pool[category]:
+                    self.category_pool[category].append(int_news_id)
+            # ----------------------------------------------------------
             
             # iterate through the words of the title
             # assign unique ids to every word
@@ -153,8 +171,10 @@ class DataProcess():
     # extracts the title and abstract of every article in these files
     def process_train_val_news(self):
         print ('process news start')
-        self.process_news(self.file1)
-        self.process_news(self.file2)
+        # file1 = train news (is_train_file=True so articles enter category_pool)
+        # file2 = dev news   (is_train_file=False so articles are NOT in category_pool)
+        self.process_news(self.file1, is_train_file=True)
+        self.process_news(self.file2, is_train_file=False)
         self.news_title = np.array(list(self.news_title_dict.values()), dtype = 'int32')
         self.news_abstract = np.array(list(self.news_abstract_dict.values()), dtype = 'int32')
         self.news_entity = np.array(list(self.news_entity_dict.values()), dtype = 'int32')
@@ -210,6 +230,96 @@ class DataProcess():
                 self.user_his_complete[self.userid_dict[line[1]]] = click_his_complete
         f4.close()
         return self.user_his_pad
+
+    # --- Echo-Chamber Debiasing: pre-compute augmented user histories ---
+    # For each user, replace non-dominant-category articles until dominant
+    # category makes up ECHO_THRESHOLD (85%) of the real (non-padding) articles.
+    # Replacement pool: train articles of dominant category (unread first, then
+    # duplicates of already-read dominant articles if pool runs out).
+    # Padding positions (news_id == 0) are never touched.
+    # Result stored in self.user_his_echo_pad — same shape as user_his_pad.
+    def generate_echo_user_his(self, echo_threshold=0.85):
+        print('generate echo user his start')
+
+        for user_id, history in self.user_his_pad.items():
+            # --- Step 1: separate real articles from padding ---
+            real_ids = [nid for nid in history if nid != 0]
+            padding_len = len(history) - len(real_ids)   # number of trailing zeros
+
+            if len(real_ids) == 0:
+                # no real history — keep all zeros
+                self.user_his_echo_pad[user_id] = history[:]
+                continue
+
+            # --- Step 2: find dominant category among real articles ---
+            category_count = {}
+            for nid in real_ids:
+                cat = self.newsid_topic.get(nid, 'NULL')
+                if cat == 'NULL':
+                    continue
+                category_count[cat] = category_count.get(cat, 0) + 1
+
+            if not category_count:
+                # no category info available — keep history unchanged
+                self.user_his_echo_pad[user_id] = history[:]
+                continue
+
+            dominant_cat = max(category_count, key=category_count.get)
+
+            # --- Step 3: compute how many dominant articles we need ---
+            real_len = len(real_ids)
+            target_dominant_count = int(real_len * echo_threshold)
+            # at minimum keep one article if threshold rounds to 0
+            target_dominant_count = max(target_dominant_count, 1)
+
+            # identify which positions are dominant vs non-dominant
+            dominant_ids   = [nid for nid in real_ids if self.newsid_topic.get(nid, 'NULL') == dominant_cat]
+            nondominant_ids = [nid for nid in real_ids if self.newsid_topic.get(nid, 'NULL') != dominant_cat]
+
+            current_dominant_count = len(dominant_ids)
+            replacements_needed = max(0, target_dominant_count - current_dominant_count)
+
+            # --- Step 4: build replacement pool ---
+            # unread dominant articles from train pool first
+            read_set = set(real_ids)
+            pool_unread = [nid for nid in self.category_pool.get(dominant_cat, [])
+                           if nid not in read_set]
+            random.shuffle(pool_unread)
+
+            # fallback: duplicates of already-read dominant articles
+            pool_duplicates = dominant_ids[:]  # copy to allow repeated sampling
+
+            # --- Step 5: build replacement list ---
+            replacement_articles = []
+            pool_idx = 0
+            dup_idx  = 0
+            for _ in range(replacements_needed):
+                if pool_idx < len(pool_unread):
+                    replacement_articles.append(pool_unread[pool_idx])
+                    pool_idx += 1
+                elif pool_duplicates:
+                    # cycle through duplicates
+                    replacement_articles.append(pool_duplicates[dup_idx % len(pool_duplicates)])
+                    dup_idx += 1
+                else:
+                    # no articles available at all (shouldn't happen), keep original
+                    break
+
+            # --- Step 6: replace non-dominant slots ---
+            # shuffle non-dominant positions and replace as many as needed
+            random.shuffle(nondominant_ids)
+            slots_to_replace = nondominant_ids[:replacements_needed]
+            replace_map = dict(zip(slots_to_replace, replacement_articles))
+
+            augmented_real = [replace_map.get(nid, nid) for nid in real_ids]
+
+            # --- Step 7: reconstruct padded history (same length = 50) ---
+            augmented_history = augmented_real + [0] * padding_len
+            self.user_his_echo_pad[user_id] = augmented_history
+
+        print('generate echo user his finished')
+        return self.user_his_echo_pad
+    # --- End Echo-Chamber Debiasing ---
 
     # 处理训练集数据
     # aim is to process the training behaviors, generates + and - samples, shuffles and organizes them

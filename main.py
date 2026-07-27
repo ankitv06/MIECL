@@ -89,6 +89,17 @@ if __name__ == '__main__':
     user_his = data_module.generate_user_his()
     user_his = torch.LongTensor(np.array(list(user_his.values()), dtype = 'int32'))
     print ('num_user: ', len(user_his))
+
+    # --- Echo-Chamber Debiasing: pre-compute augmented user histories ---
+    # Only generated when infonce_mode is 'echo_chamber_debiased';
+    # for all other modes user_his_echo remains None and is never used.
+    user_his_echo = None
+    if infonce_mode == 'echo_chamber_debiased':
+        print('infonce_mode=echo_chamber_debiased: generating echo-chamber user histories...')
+        user_his_echo_raw = data_module.generate_echo_user_his(echo_threshold=0.85)
+        user_his_echo = torch.LongTensor(np.array(list(user_his_echo_raw.values()), dtype='int32'))
+        print('user_his_echo.size: ', user_his_echo.size())
+    # --- End Echo-Chamber Debiasing ---
     
     model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode)
     device_ids = [0,1,2,3,4,5,6,7]
@@ -125,7 +136,7 @@ if __name__ == '__main__':
         [train_candidate, train_user, train_label] = data_module.pre_train_behaviors()
         train_dataset = Data.TensorDataset(train_candidate, train_user, train_label)
         train_loader = Data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
-        '''
+        # --- Training loop (echo_chamber_debiased mode adds echo history per batch) ---
         for n_ep in range(num_epoch):
             acc, all = 0, 0
             t0 = time.time()
@@ -133,52 +144,63 @@ if __name__ == '__main__':
 
             # batches from the training loader
             # news titles and abstracts are obtained based on user behavior
-            # neighboring users and corresponding news titles and abstracts are obtained
             # model set to training mode + gradients set to 0
             # model saved after every epoch
             for step, (train_candidate, train_user, train_label) in enumerate(train_loader):
                 t1 = time.time()
-                candidate_title, his_title, train_label = news_title[train_candidate], news_title[user_his[train_user]], train_label
-                candidate_title, his_title, train_label = Variable(candidate_title),Variable(his_title), Variable(train_label)
-                candidate_abstract, his_abstract  = news_abstract[train_candidate], news_abstract[user_his[train_user]]
-                candidate_abstract, his_abstract  = Variable(candidate_abstract),Variable(his_abstract)
-                print (candidate_title.size(), candidate_abstract.size())
+                candidate_title  = news_title[train_candidate]
+                his_title        = news_title[user_his[train_user]]
+                candidate_title, his_title, train_label = Variable(candidate_title), Variable(his_title), Variable(train_label)
+                candidate_abstract = news_abstract[train_candidate]
+                his_abstract       = news_abstract[user_his[train_user]]
+                candidate_abstract, his_abstract = Variable(candidate_abstract), Variable(his_abstract)
 
-                #neighbor_user = user_adj[train_user]
-                #(neighbor_1, neighbor_2) = torch.split(neighbor_user, 1, dim = 1)
-                #neighbor_1, neighbor_2 = neighbor_1.squeeze(dim = 1), neighbor_2.squeeze(dim = 1)
-                
-                #nei1_title, nei1_abstract  = news_title[user_his[neighbor_1]].cuda(), news_abstract[user_his[neighbor_1]].cuda()
-                #nei1_title, nei1_abstract = Variable(nei1_title), Variable(nei1_abstract)
-                #nei2_title, nei2_abstract  = news_title[user_his[neighbor_2]].cuda(), news_abstract[user_his[neighbor_2]].cuda()
-                #nei2_title, nei2_abstract = Variable(nei2_title), Variable(nei2_abstract)
+                # --- Echo-Chamber Debiasing: fetch pre-computed echo histories for this batch ---
+                # echo_his_title/abstract have the same shape as his_title/abstract: [batch, 50, word_len]
+                # They are only passed to the model when infonce_mode == 'echo_chamber_debiased';
+                # for all other modes they remain None and the model ignores them.
+                echo_his_title    = None
+                echo_his_abstract = None
+                if infonce_mode == 'echo_chamber_debiased':
+                    echo_his_title    = Variable(news_title[user_his_echo[train_user]])
+                    echo_his_abstract = Variable(news_abstract[user_his_echo[train_user]])
+                # --- End Echo-Chamber Debiasing ---
 
                 model.train()
                 optimizer.zero_grad()
 
-                #predictor_logits, user_infoNCE_logits = model(candidate_title, candidate_abstract, his_title, his_abstract, neighbor_title, neighbor_abstract)
-                predictor_logits, user_infoNCE_logits = model(candidate_title, candidate_abstract, his_title, his_abstract)
+                predictor_logits, user_infoNCE_logits = model(
+                    candidate_title, candidate_abstract,
+                    his_title, his_abstract,
+                    echo_his_title, echo_his_abstract   # None for non-echo modes
+                )
                 predictor_loss = criterion(predictor_logits, train_label)
-                
+
                 if contrastive_mode == 'USER':
+                    # labels are zeros: index 0 in logits is always the positive (I_k)
+                    # for echo_chamber_debiased, logits shape is [B*(K-1), 2];
+                    # for prototype_self, logits shape is [B, 2].
+                    # F.cross_entropy handles both via its built-in mean reduction.
                     user_infoNCE_labels = torch.zeros(len(user_infoNCE_logits), dtype=torch.long)
-                    user_infoNCE_loss = F.cross_entropy(user_infoNCE_logits, user_infoNCE_labels)
-                    print ('predictor_loss: ', predictor_loss.data.item(), 'user_infoNCE_loss: ', user_infoNCE_loss.data.item())
+                    user_infoNCE_loss   = F.cross_entropy(user_infoNCE_logits, user_infoNCE_labels)
+                    print('predictor_loss: ', predictor_loss.data.item(), 'user_infoNCE_loss: ', user_infoNCE_loss.data.item())
                     loss = predictor_loss + alpha * user_infoNCE_loss
                 else:
-                    print ('predictor_loss: ', predictor_loss.data.item())
+                    print('predictor_loss: ', predictor_loss.data.item())
                     loss = predictor_loss
-                    
+
                 loss.backward()
                 optimizer.step()
 
                 loss_per_epoch.append(loss.data.item())
-                print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'step: {:04d}'.format(step + 1), 'loss: {:.4f}'.format(np.mean(loss_per_epoch)), 'time: {:.4f}'.format(time.time() - t1))
+                print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1),
+                      'step: {:04d}'.format(step + 1),
+                      'loss: {:.4f}'.format(np.mean(loss_per_epoch)),
+                      'time: {:.4f}'.format(time.time() - t1))
 
             torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(n_d * num_epoch + n_ep + 1))
             print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'time: {:.4f}'.format(time.time() - t0))
         del train_candidate, train_user, train_label
-    '''
     print("TRAINING DONE-------------------------------------------------------------------------------------------------------------------------------------------------")
     # validation and evaluation
     
