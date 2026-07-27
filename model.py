@@ -450,7 +450,7 @@ class Multi_Rep_Predictor(nn.Module):
 		else:
 			pass
 
-		if self.contrastive_mode == 'USER':
+		if self.contrastive_mode == 'USER' and self.training:
 			if self.infoNCE.mode == 'echo_chamber_debiased':
 				# --- Echo-Chamber Debiased path ---
 				# encode the echo-chamber augmented history through the same pipeline
