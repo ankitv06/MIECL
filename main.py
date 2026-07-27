@@ -43,6 +43,7 @@ if __name__ == '__main__':
     parser.add_argument('--agg_mode', type=str, default='soft')
     parser.add_argument('--dataset_dir', type=str, default='dataset')
     parser.add_argument('--glove_path', type=str, default='dataset/glove.840B.300d.txt')
+    parser.add_argument('--val_only', action='store_true', help='Skip training and run only validation')
     args = parser.parse_args()
 
     num_epoch = args.num_epoch
@@ -66,6 +67,7 @@ if __name__ == '__main__':
     agg_mode = args.agg_mode
     dataset_dir = args.dataset_dir
     glove_path = args.glove_path
+    val_only = args.val_only
 
     if not os.path.exists(preserve_dir):
         os.makedirs(preserve_dir)
@@ -128,76 +130,79 @@ if __name__ == '__main__':
     best_epoch = 0
     min_loss = float('inf')
 
-    for n_d in range(num_dataset):
-        # training loop
-        [train_candidate, train_user, train_label] = data_module.pre_train_behaviors()
-        train_dataset = Data.TensorDataset(train_candidate, train_user, train_label)
-        train_loader = Data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
-        # --- Training loop (echo_chamber_debiased mode adds echo history per batch) ---
-        for n_ep in range(num_epoch):
-            acc, all = 0, 0
-            t0 = time.time()
-            loss_per_epoch = []
+    if not val_only:
+        for n_d in range(num_dataset):
+            # training loop
+            [train_candidate, train_user, train_label] = data_module.pre_train_behaviors()
+            train_dataset = Data.TensorDataset(train_candidate, train_user, train_label)
+            train_loader = Data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+            # --- Training loop (echo_chamber_debiased mode adds echo history per batch) ---
+            for n_ep in range(num_epoch):
+                acc, all = 0, 0
+                t0 = time.time()
+                loss_per_epoch = []
 
-            # batches from the training loader
-            # news titles and abstracts are obtained based on user behavior
-            # model set to training mode + gradients set to 0
-            # model saved after every epoch
-            for step, (train_candidate, train_user, train_label) in enumerate(train_loader):
-                t1 = time.time()
-                candidate_title  = news_title[train_candidate].to(device)
-                his_title        = news_title[user_his[train_user]].to(device)
-                candidate_title, his_title, train_label = Variable(candidate_title), Variable(his_title), Variable(train_label).to(device)
-                candidate_abstract = news_abstract[train_candidate].to(device)
-                his_abstract       = news_abstract[user_his[train_user]].to(device)
-                candidate_abstract, his_abstract = Variable(candidate_abstract), Variable(his_abstract)
+                # batches from the training loader
+                # news titles and abstracts are obtained based on user behavior
+                # model set to training mode + gradients set to 0
+                # model saved after every epoch
+                for step, (train_candidate, train_user, train_label) in enumerate(train_loader):
+                    t1 = time.time()
+                    candidate_title  = news_title[train_candidate].to(device)
+                    his_title        = news_title[user_his[train_user]].to(device)
+                    candidate_title, his_title, train_label = Variable(candidate_title), Variable(his_title), Variable(train_label).to(device)
+                    candidate_abstract = news_abstract[train_candidate].to(device)
+                    his_abstract       = news_abstract[user_his[train_user]].to(device)
+                    candidate_abstract, his_abstract = Variable(candidate_abstract), Variable(his_abstract)
 
-                # --- Echo-Chamber Debiasing: fetch pre-computed echo histories for this batch ---
-                # echo_his_title/abstract have the same shape as his_title/abstract: [batch, 50, word_len]
-                # They are only passed to the model when infonce_mode == 'echo_chamber_debiased';
-                # for all other modes they remain None and the model ignores them.
-                echo_his_title    = None
-                echo_his_abstract = None
-                if infonce_mode == 'echo_chamber_debiased':
-                    echo_his_title    = Variable(news_title[user_his_echo[train_user]]).to(device)
-                    echo_his_abstract = Variable(news_abstract[user_his_echo[train_user]]).to(device)
-                # --- End Echo-Chamber Debiasing ---
+                    # --- Echo-Chamber Debiasing: fetch pre-computed echo histories for this batch ---
+                    # echo_his_title/abstract have the same shape as his_title/abstract: [batch, 50, word_len]
+                    # They are only passed to the model when infonce_mode == 'echo_chamber_debiased';
+                    # for all other modes they remain None and the model ignores them.
+                    echo_his_title    = None
+                    echo_his_abstract = None
+                    if infonce_mode == 'echo_chamber_debiased':
+                        echo_his_title    = Variable(news_title[user_his_echo[train_user]]).to(device)
+                        echo_his_abstract = Variable(news_abstract[user_his_echo[train_user]]).to(device)
+                    # --- End Echo-Chamber Debiasing ---
 
-                model.train()
-                optimizer.zero_grad()
+                    model.train()
+                    optimizer.zero_grad()
 
-                predictor_logits, user_infoNCE_logits = model(
-                    candidate_title, candidate_abstract,
-                    his_title, his_abstract,
-                    echo_his_title, echo_his_abstract   # None for non-echo modes
-                )
-                predictor_loss = criterion(predictor_logits, train_label)
+                    predictor_logits, user_infoNCE_logits = model(
+                        candidate_title, candidate_abstract,
+                        his_title, his_abstract,
+                        echo_his_title, echo_his_abstract   # None for non-echo modes
+                    )
+                    predictor_loss = criterion(predictor_logits, train_label)
 
-                if contrastive_mode == 'USER':
-                    # labels are zeros: index 0 in logits is always the positive (I_k)
-                    # for echo_chamber_debiased, logits shape is [B*(K-1), 2];
-                    # for prototype_self, logits shape is [B, 2].
-                    # F.cross_entropy handles both via its built-in mean reduction.
-                    user_infoNCE_labels = torch.zeros(len(user_infoNCE_logits), dtype=torch.long, device=device)
-                    user_infoNCE_loss   = F.cross_entropy(user_infoNCE_logits, user_infoNCE_labels)
-                    print('predictor_loss: ', predictor_loss.data.item(), 'user_infoNCE_loss: ', user_infoNCE_loss.data.item())
-                    loss = predictor_loss + alpha * user_infoNCE_loss
-                else:
-                    print('predictor_loss: ', predictor_loss.data.item())
-                    loss = predictor_loss
+                    if contrastive_mode == 'USER':
+                        # labels are zeros: index 0 in logits is always the positive (I_k)
+                        # for echo_chamber_debiased, logits shape is [B*(K-1), 2];
+                        # for prototype_self, logits shape is [B, 2].
+                        # F.cross_entropy handles both via its built-in mean reduction.
+                        user_infoNCE_labels = torch.zeros(len(user_infoNCE_logits), dtype=torch.long, device=device)
+                        user_infoNCE_loss   = F.cross_entropy(user_infoNCE_logits, user_infoNCE_labels)
+                        print('predictor_loss: ', predictor_loss.data.item(), 'user_infoNCE_loss: ', user_infoNCE_loss.data.item())
+                        loss = predictor_loss + alpha * user_infoNCE_loss
+                    else:
+                        print('predictor_loss: ', predictor_loss.data.item())
+                        loss = predictor_loss
 
-                loss.backward()
-                optimizer.step()
+                    loss.backward()
+                    optimizer.step()
 
-                loss_per_epoch.append(loss.data.item())
-                print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1),
-                      'step: {:04d}'.format(step + 1),
-                      'loss: {:.4f}'.format(np.mean(loss_per_epoch)),
-                      'time: {:.4f}'.format(time.time() - t1))
+                    loss_per_epoch.append(loss.data.item())
+                    print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1),
+                          'step: {:04d}'.format(step + 1),
+                          'loss: {:.4f}'.format(np.mean(loss_per_epoch)),
+                          'time: {:.4f}'.format(time.time() - t1))
 
-            torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(n_d * num_epoch + n_ep + 1))
-            print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'time: {:.4f}'.format(time.time() - t0))
-        del train_candidate, train_user, train_label
+                torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(n_d * num_epoch + n_ep + 1))
+                print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'time: {:.4f}'.format(time.time() - t0))
+            del train_candidate, train_user, train_label
+    else:
+        print("Skipping training, starting validation from saved checkpoint...")
     print("TRAINING DONE-------------------------------------------------------------------------------------------------------------------------------------------------")
     # validation and evaluation
     
