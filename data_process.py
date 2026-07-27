@@ -5,6 +5,7 @@ import numpy as np
 import random
 import torch
 import json
+import os
 
 #import nltk
 #nltk.download('punkt')
@@ -135,7 +136,14 @@ class DataProcess():
     def generate_entity_matrix(self):
         print ('generate entity matrix start')
         entity_embed = {}
-        f1 = open('MINDlarge_train/entity_embedding.vec', 'r')
+        
+        # Determine directory paths dynamically from self.file1 (train news) and self.file2 (dev news)
+        train_dir = os.path.dirname(self.file1)
+        dev_dir   = os.path.dirname(self.file2)
+        f1_path   = os.path.join(train_dir, 'entity_embedding.vec')
+        f2_path   = os.path.join(dev_dir, 'entity_embedding.vec')
+
+        f1 = open(f1_path, 'r')
         lines1 = f1.readlines()
         for line in lines1:
             line = line.strip().split('\t')
@@ -143,7 +151,9 @@ class DataProcess():
                 self.entity_dict[line[0]] = len(self.entity_dict)
             if self.entity_dict[line[0]] not in entity_embed:
                 entity_embed[self.entity_dict[line[0]]] = np.array([float(i) for i in line[1:]])
-        f2 = open('MINDlarge_dev/entity_embedding.vec', 'r')
+        f1.close()
+
+        f2 = open(f2_path, 'r')
         lines2 = f2.readlines()
         for line in lines2:
             line = line.strip().split('\t')
@@ -151,6 +161,7 @@ class DataProcess():
                 self.entity_dict[line[0]] = len(self.entity_dict)
             if self.entity_dict[line[0]] not in entity_embed:
                 entity_embed[self.entity_dict[line[0]]] = np.array([float(i) for i in line[1:]])
+        f2.close()
         
         # dictionary
         # keys are the embedding ids
