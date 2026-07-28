@@ -31,6 +31,8 @@ if __name__ == '__main__':
     parser.add_argument('--num_head', type=int, default=20)
     parser.add_argument('--num_prototype', type=int, default=5)
     parser.add_argument('--alpha', type=float, default=1.0)
+    parser.add_argument('--beta', type=float, default=1.0)
+    parser.add_argument('--temperature', type=float, default=0.07)
     parser.add_argument('--num_negative_sample', type=int, default=3)
     parser.add_argument('--word_dim', type=int, default=300)
     parser.add_argument('--preserve_dir', type=str, default='C:/Users/anany/Desktop/Ananya/2023/Estonia Projects/News Recc/MIECL-master')
@@ -59,6 +61,8 @@ if __name__ == '__main__':
     pretrain_method = args.pretrain_method
     num_prototype = args.num_prototype
     alpha = args.alpha
+    beta  = args.beta
+    temperature = args.temperature
     dropout_rate = args.dropout_rate
     multi_rep_mode = args.multi_rep_mode
     infonce_mode = args.infonce_mode
@@ -100,11 +104,11 @@ if __name__ == '__main__':
     print ('num_user: ', len(user_his))
 
     # --- Echo-Chamber Debiasing: pre-compute augmented user histories ---
-    # Only generated when infonce_mode is 'echo_chamber_debiased';
-    # for all other modes user_his_echo remains None and is never used.
+    # Always generated when contrastive_mode is 'USER' — both proto and echo losses are
+    # computed during every training step regardless of infonce_mode (which is kept as a label).
     user_his_echo = None
-    if infonce_mode == 'echo_chamber_debiased':
-        print('infonce_mode=echo_chamber_debiased: generating echo-chamber user histories...')
+    if contrastive_mode == 'USER':
+        print('Generating echo-chamber user histories for contrastive training...')
         user_his_echo_raw = data_module.generate_echo_user_his(echo_threshold=0.85)
         user_his_echo = torch.LongTensor(np.array(list(user_his_echo_raw.values()), dtype='int32'))
         print('user_his_echo.size: ', user_his_echo.size())
@@ -113,7 +117,7 @@ if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Running on device:", device)
 
-    model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode)
+    model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode, temperature=temperature)
     model = model.to(device)
     if torch.cuda.is_available():
         model = nn.DataParallel(model)
@@ -155,41 +159,38 @@ if __name__ == '__main__':
                     his_abstract       = news_abstract[user_his[train_user]].to(device)
                     candidate_abstract, his_abstract = Variable(candidate_abstract), Variable(his_abstract)
 
-                    # --- Echo-Chamber Debiasing: fetch pre-computed echo histories for this batch ---
-                    # echo_his_title/abstract have the same shape as his_title/abstract: [batch, 50, word_len]
-                    # They are only passed to the model when infonce_mode == 'echo_chamber_debiased';
-                    # for all other modes they remain None and the model ignores them.
-                    echo_his_title    = None
-                    echo_his_abstract = None
-                    if infonce_mode == 'echo_chamber_debiased':
-                        echo_his_title    = Variable(news_title[user_his_echo[train_user]]).to(device)
-                        echo_his_abstract = Variable(news_abstract[user_his_echo[train_user]]).to(device)
-                    # --- End Echo-Chamber Debiasing ---
+                    # fetch echo histories for this batch (always done when contrastive_mode == USER)
+                    echo_his_title    = Variable(news_title[user_his_echo[train_user]]).to(device)
+                    echo_his_abstract = Variable(news_abstract[user_his_echo[train_user]]).to(device)
 
                     model.train()
                     optimizer.zero_grad()
 
-                    predictor_logits, user_infoNCE_logits = model(
+                    # model always returns 3-tuple during training:
+                    # (predict_logits, proto_logits [B,2], echo_logits [B*(K-1),2])
+                    predictor_logits, proto_logits, echo_logits = model(
                         candidate_title, candidate_abstract,
                         his_title, his_abstract,
-                        echo_his_title, echo_his_abstract   # None for non-echo modes
+                        echo_his_title, echo_his_abstract
                     )
                     predictor_loss = criterion(predictor_logits, train_label)
 
                     if contrastive_mode == 'USER':
-                        # labels are zeros: index 0 in logits is always the positive (I_k)
-                        # for echo_chamber_debiased, logits shape is [B*(K-1), 2];
-                        # for prototype_self, logits shape is [B, 2].
-                        # F.cross_entropy handles both via its built-in mean reduction.
-                        user_infoNCE_labels = torch.zeros(len(user_infoNCE_logits), dtype=torch.long, device=device)
-                        user_infoNCE_loss   = F.cross_entropy(user_infoNCE_logits, user_infoNCE_labels)
-                        print('predictor_loss: ', predictor_loss.data.item(), 'user_infoNCE_loss: ', user_infoNCE_loss.data.item())
-                        loss = predictor_loss + alpha * user_infoNCE_loss
+                        # labels are zeros: index 0 in logits is always the positive
+                        proto_labels = torch.zeros(len(proto_logits), dtype=torch.long, device=device)
+                        echo_labels  = torch.zeros(len(echo_logits),  dtype=torch.long, device=device)
+                        proto_loss   = F.cross_entropy(proto_logits, proto_labels)
+                        echo_loss    = F.cross_entropy(echo_logits,  echo_labels)
+                        loss = predictor_loss + alpha * proto_loss + beta * echo_loss
+                        print('predictor: {:.4f}  proto_CL: {:.4f}  echo_CL: {:.4f}  total: {:.4f}'.format(
+                            predictor_loss.item(), proto_loss.item(), echo_loss.item(), loss.item()))
                     else:
-                        print('predictor_loss: ', predictor_loss.data.item())
                         loss = predictor_loss
+                        print('predictor_loss: ', predictor_loss.data.item())
 
+                    # gradient clipping to prevent loss spikes / exploding gradients
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                     optimizer.step()
 
                     loss_per_epoch.append(loss.data.item())
