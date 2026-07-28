@@ -327,7 +327,7 @@ if __name__ == '__main__':
                 #neighbor_title, neighbor_abstract = Variable(neighbor_title), Variable(neighbor_abstract)
                 #print (neighbor_title.size(), neighbor_abstract.size())
 
-                predictor_logits, _ = model(candidate_title, candidate_abstract, his_title, his_abstract)
+                predictor_logits, _, __ = model(candidate_title, candidate_abstract, his_title, his_abstract)
                 # prob of clicking on that article
                 score = torch.sigmoid(predictor_logits).cpu().data.numpy()
                 val_score = val_score + score.tolist()
