@@ -316,10 +316,10 @@ class InfoNCE(nn.Module):
 		# anchor: u_k (one interest of real user), positive: I_k (global prototype),
 		# negative: u_k' (different interest of same user). k chosen randomly per batch.
 		# 正负样本1:1，正样本为对应兴趣原型向量，负样本为随机抽取某兴趣条件下新闻语义表示
-		positive_index = torch.randint(low=0, high=multi_rep.size(1), size=(1,))
-		negative_index = torch.randint(low=0, high=multi_rep.size(1), size=(1,))
+		positive_index = torch.randint(low=0, high=multi_rep.size(1), size=(1,), device=multi_rep.device)
+		negative_index = torch.randint(low=0, high=multi_rep.size(1), size=(1,), device=multi_rep.device)
 		while positive_index == negative_index:
-			negative_index = torch.randint(low=0, high=multi_rep.size(1), size=(1,))
+			negative_index = torch.randint(low=0, high=multi_rep.size(1), size=(1,), device=multi_rep.device)
 
 		anchor   = torch.index_select(multi_rep, dim=1, index=positive_index).squeeze(dim=1)  # [B, D]
 		positive = torch.index_select(self.prototype, dim=0, index=positive_index)             # [1, D]
