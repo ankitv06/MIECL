@@ -18,6 +18,7 @@ import pickle
 import argparse
 import os
 import glob
+import csv
 
 
 if __name__ == '__main__':
@@ -142,6 +143,13 @@ if __name__ == '__main__':
             train_loader = Data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
             # --- Training loop (echo_chamber_debiased mode adds echo history per batch) ---
             for n_ep in range(num_epoch):
+                curr_epoch = n_d * num_epoch + n_ep + 1
+                log_csv_path = os.path.join(preserve_dir, f'epoch_{curr_epoch:03d}_loss_log.csv')
+                log_file = open(log_csv_path, 'w', newline='', encoding='utf-8')
+                log_writer = csv.writer(log_file)
+                log_writer.writerow(['epoch', 'step', 'predictor_loss', 'user_infoNCE_loss', 'echo_chamber_debiased_loss', 'total_loss', 'mean_loss', 'grad_norm', 'lr', 'step_time_s'])
+                log_file.flush()
+
                 acc, all = 0, 0
                 t0 = time.time()
                 loss_per_epoch = []
@@ -182,25 +190,45 @@ if __name__ == '__main__':
                         proto_loss   = F.cross_entropy(proto_logits, proto_labels)
                         echo_loss    = F.cross_entropy(echo_logits,  echo_labels)
                         loss = predictor_loss + alpha * proto_loss + beta * echo_loss
+                        p_val     = predictor_loss.item()
+                        proto_val = proto_loss.item()
+                        echo_val  = echo_loss.item()
                         print('predictor: {:.4f}  proto_CL: {:.4f}  echo_CL: {:.4f}  total: {:.4f}'.format(
-                            predictor_loss.item(), proto_loss.item(), echo_loss.item(), loss.item()))
+                            p_val, proto_val, echo_val, loss.item()))
                     else:
                         loss = predictor_loss
+                        p_val     = predictor_loss.item()
+                        proto_val = 0.0
+                        echo_val  = 0.0
                         print('predictor_loss: ', predictor_loss.data.item())
 
                     # gradient clipping to prevent loss spikes / exploding gradients
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0).item()
                     optimizer.step()
 
+                    step_time = time.time() - t1
                     loss_per_epoch.append(loss.data.item())
-                    print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1),
-                          'step: {:04d}'.format(step + 1),
-                          'loss: {:.4f}'.format(np.mean(loss_per_epoch)),
-                          'time: {:.4f}'.format(time.time() - t1))
+                    curr_step  = step + 1
+                    curr_mean  = float(np.mean(loss_per_epoch))
+                    curr_lr    = optimizer.param_groups[0]['lr']
 
-                torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(n_d * num_epoch + n_ep + 1))
-                print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'time: {:.4f}'.format(time.time() - t0))
+                    # Log metrics to per-epoch CSV file in real time
+                    log_writer.writerow([
+                        curr_epoch, curr_step, round(p_val, 6), round(proto_val, 6),
+                        round(echo_val, 6), round(loss.item(), 6), round(curr_mean, 6),
+                        round(grad_norm, 6), curr_lr, round(step_time, 4)
+                    ])
+                    log_file.flush()
+
+                    print('epoch: {:04d}'.format(curr_epoch),
+                          'step: {:04d}'.format(curr_step),
+                          'loss: {:.4f}'.format(curr_mean),
+                          'time: {:.4f}'.format(step_time))
+
+                log_file.close()
+                torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(curr_epoch))
+                print('epoch: {:04d}'.format(curr_epoch), 'time: {:.4f}'.format(time.time() - t0))
             del train_candidate, train_user, train_label
     else:
         print("Skipping training, starting validation from saved checkpoint...")
