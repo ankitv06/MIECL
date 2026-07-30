@@ -4,3 +4,4 @@ dataset/
 *.ckpt
 *.bin
 __pycache__/
+outputs/
