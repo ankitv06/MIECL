@@ -47,6 +47,12 @@ if __name__ == '__main__':
     parser.add_argument('--dataset_dir', type=str, default='dataset')
     parser.add_argument('--glove_path', type=str, default='dataset/glove.840B.300d.txt')
     parser.add_argument('--val_only', action='store_true', help='Skip training and run only validation')
+    parser.add_argument('--eval_only', action='store_true',
+                        help='Skip training and only run evaluation on saved checkpoints.')
+    parser.add_argument('--eval_epoch', type=int, default=-1,
+                        help='Specific epoch to evaluate (e.g., 200). If -1, evaluates all.')
+    parser.add_argument('--eval_batch_size', type=int, default=32,
+                        help='Batch size to use during evaluation to prevent OOM (default 32).')
     args = parser.parse_args()
 
     num_epoch = args.num_epoch
@@ -135,7 +141,7 @@ if __name__ == '__main__':
     best_epoch = 0
     min_loss = float('inf')
 
-    if not val_only:
+    if not args.eval_only and not val_only:
         for n_d in range(num_dataset):
             # training loop
             [train_candidate, train_user, train_label] = data_module.pre_train_behaviors()
@@ -234,6 +240,7 @@ if __name__ == '__main__':
         print("Skipping training, starting validation from saved checkpoint...")
     print("TRAINING DONE-------------------------------------------------------------------------------------------------------------------------------------------------")
     # validation and evaluation
+    torch.cuda.empty_cache()
     
     # cand articles, user ids, labels (0/1), number of candidate articles for that user
     [val_candidate, val_user, val_label, val_index] = data_module.pre_val_behaviors(file4)
@@ -274,22 +281,22 @@ if __name__ == '__main__':
     subset_indices = range(32760)  # Choose the indices of the entries you want to include
     subset_dataset = Subset(val_dataset, subset_indices)
 
-    # Create a new DataLoader with the subset dataset
-    subset_loader = Data.DataLoader(dataset=subset_dataset, batch_size=batch_size * 3, shuffle=False, num_workers=2)
+    # Create a new DataLoader with the subset dataset using eval_batch_size
+    subset_loader = Data.DataLoader(dataset=subset_dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=2)
     val_loader = subset_loader
 
-    #val_candidate = np.array_split(val_candidate, 8000)     # [7600, 1800] , [11400, 1200], [22800, 600], [15200, 900]
-    #val_user = np.array_split(val_user, 8000)       # [9120, 1500] , [34200, 400], [30400, 450]
-    # [90, 26600] [400, 6600]
+    # Determine which epochs to evaluate
+    epochs_to_eval = range(1, num_dataset * num_epoch + 1)
+    if args.eval_epoch > 0:
+        epochs_to_eval = [args.eval_epoch]
 
-    for n_d in range(num_dataset * num_epoch):
-        #model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode)
-        #loaded_dict = torch.load(preserve_dir + '/model_{}.pkl'.format(n_d + 1))
-        #model = nn.DataParallel(model, device_ids = [0])
-        #model.state_dict = loaded_dict
-        #print (next(model.parameters()).device)
-
-        model.load_state_dict(torch.load(preserve_dir + '/model_{}.pkl'.format(n_d + 1)))
+    for epoch_idx in epochs_to_eval:
+        checkpoint_path = preserve_dir + '/model_{}.pkl'.format(epoch_idx)
+        if not os.path.exists(checkpoint_path):
+            print("Checkpoint not found:", checkpoint_path)
+            continue
+            
+        model.load_state_dict(torch.load(checkpoint_path))
         model = model
         model.eval()
         val_score = []
@@ -332,20 +339,20 @@ if __name__ == '__main__':
                 score = torch.sigmoid(predictor_logits).cpu().data.numpy()
                 val_score = val_score + score.tolist()
             print('val_time: {:.4f}'.format(time.time() - t), 'val_score.length: ', len(val_score))
-        f = open(preserve_dir + '/val_score_{}.pkl'.format(n_d + 1), 'wb')
+        f = open(preserve_dir + '/val_score_{}.pkl'.format(epoch_idx), 'wb')
         pickle.dump(val_score, f)
         f.close()
 
         #f1 = open(preserve_dir + '/val_index.pkl', 'rb')
-        #f2 = open(preserve_dir + '/val_score_{}.pkl'.format(n_d + 1), 'rb')
+        #f2 = open(preserve_dir + '/val_score_{}.pkl'.format(epoch_idx), 'rb')
         #f3 = open(preserve_dir + '/val_label.pkl', 'rb')
 
         #val_index = pickle.load(f1)
         #val_score = pickle.load(f2)
         #val_label = pickle.load(f3)
 
-        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(n_d + 1), 'w')
-        print ('process predict_file_{} start'.format(n_d + 1))
+        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(epoch_idx), 'w')
+        print ('process predict_file_{} start'.format(epoch_idx))
 
         # every term in val index represents the number of candidate articles associated with every user
         #print('val score: ', val_score)
@@ -369,18 +376,18 @@ if __name__ == '__main__':
 
         predict_file.flush()
         predict_file.close()
-        print ('process predict_file_{} finished'.format(n_d + 1))
+        print ('process predict_file_{} finished'.format(epoch_idx))
         
-        print ('calculate {}_th auc/mrr/ndcg start'.format(n_d + 1))
-        output_filename = preserve_dir + '/scores_{}.txt'.format(n_d + 1)
+        print ('calculate {}_th auc/mrr/ndcg start'.format(epoch_idx))
+        output_filename = preserve_dir + '/scores_{}.txt'.format(epoch_idx)
         output_file = open(output_filename, 'w')
 
         truth_file = open(preserve_dir + '/truth.txt', 'r')
-        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(n_d + 1), 'r')
+        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(epoch_idx), 'r')
 
         auc, mrr, ndcg, ndcg10 = scoring(truth_file, predict_file)
 
         output_file.write("AUC:{:.4f}\nMRR:{:.4f}\nnDCG@5:{:.4f}\nnDCG@10:{:.4f}".format(auc, mrr, ndcg, ndcg10))
         output_file.close()
-        print ('calculate {}_th auc/mrr/ndcg finished'.format(n_d + 1))
+        print ('calculate {}_th auc/mrr/ndcg finished'.format(epoch_idx))
         
