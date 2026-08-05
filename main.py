@@ -18,67 +18,104 @@ import pickle
 import argparse
 import os
 import glob
+import csv
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--num_epoch', type=int, default=1)
-    parser.add_argument('--num_dataset', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=0.001)
-    parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--batch_size', type=int, default=30)
-    parser.add_argument('--hid_dim', type=int, default=400)
-    parser.add_argument('--num_head', type=int, default=20)
-    parser.add_argument('--num_prototype', type=int, default=5)
-    parser.add_argument('--alpha', type=float, default=1.0)
-    parser.add_argument('--num_negative_sample', type=int, default=3)
-    parser.add_argument('--word_dim', type=int, default=300)
-    parser.add_argument('--preserve_dir', type=str, default='C:/Users/anany/Desktop/Ananya/2023/Estonia Projects/News Recc/MIECL-master')
-    parser.add_argument('--pretrain_method', type=str, default='glove')
+    # --- Training ---
+    parser.add_argument('--num_epoch',   type=int,   default=1)
+    parser.add_argument('--num_dataset', type=int,   default=1)
+    parser.add_argument('--batch_size',  type=int,   default=30)
+    parser.add_argument('--lr',          type=float, default=0.001)
+    parser.add_argument('--weight_decay',type=float, default=1e-4)
+    # --- Model architecture ---
+    parser.add_argument('--hid_dim',      type=int,   default=400)
+    parser.add_argument('--num_head',     type=int,   default=20)
+    parser.add_argument('--num_prototype',type=int,   default=5)
+    parser.add_argument('--word_dim',     type=int,   default=300)
     parser.add_argument('--dropout_rate', type=float, default=0.1)
+    parser.add_argument('--num_negative_sample', type=int, default=3)
     parser.add_argument('--multi_rep_mode', type=str, default='concat')
-    parser.add_argument('--infonce_mode', type=str, default='prototype_self')
+    parser.add_argument('--infonce_mode',   type=str, default='prototype_self',
+                        choices=['prototype_self', 'echo_chamber_debiased',
+                                 'popularity_debiased', 'all_combined'])
     parser.add_argument('--contrastive_mode', type=str, default='USER')
-    parser.add_argument('--gnn_mode', type=str, default='nogat')
-    parser.add_argument('--agg_mode', type=str, default='soft')
+    parser.add_argument('--gnn_mode',  type=str, default='nogat')
+    parser.add_argument('--agg_mode',  type=str, default='soft')
+    parser.add_argument('--pretrain_method', type=str, default='glove')
+    # --- Loss weights (one per CL path) ---
+    parser.add_argument('--alpha', type=float, default=0.5,
+                        help='Weight for prototype_self CL loss (always active)')
+    parser.add_argument('--beta',  type=float, default=0.2,
+                        help='Weight for echo_chamber_debiased CL loss')
+    parser.add_argument('--gamma', type=float, default=0.1,
+                        help='Weight for popularity_debiased CL loss')
+    # --- Temperatures (separate per CL path) ---
+    parser.add_argument('--temp_proto', type=float, default=0.1,
+                        help='Temperature for prototype_self InfoNCE')
+    parser.add_argument('--temp_echo',  type=float, default=0.07,
+                        help='Temperature for echo_chamber_debiased InfoNCE')
+    parser.add_argument('--temp_pop',   type=float, default=0.2,
+                        help='Temperature for popularity_debiased InfoNCE')
+    # --- Paths ---
+    parser.add_argument('--dataset_dir', type=str, required=True,
+                        help='Root dir containing MINDsmall_train/ and MINDsmall_dev/')
+    parser.add_argument('--glove_path',  type=str, required=True,
+                        help='Path to glove.840B.300d.txt')
+    parser.add_argument('--preserve_dir', type=str, required=True,
+                        help='Output directory for model checkpoints, logs, scores')
+    # --- Misc ---
+    parser.add_argument('--val_only', action='store_true',
+                        help='Skip training and go straight to validation')
     args = parser.parse_args()
 
-    num_epoch = args.num_epoch
-    num_dataset = args.num_dataset
-    lr = args.lr
-    weight_decay = args.weight_decay
-    batch_size = args.batch_size
-    hid_dim = args.hid_dim
-    num_head = args.num_head
-    word_dim = args.word_dim
+    num_epoch        = args.num_epoch
+    num_dataset      = args.num_dataset
+    batch_size       = args.batch_size
+    lr               = args.lr
+    weight_decay     = args.weight_decay
+    hid_dim          = args.hid_dim
+    num_head         = args.num_head
+    num_prototype    = args.num_prototype
+    word_dim         = args.word_dim
+    dropout_rate     = args.dropout_rate
     num_negative_sample = args.num_negative_sample
-    preserve_dir = args.preserve_dir
-    pretrain_method = args.pretrain_method
-    num_prototype = args.num_prototype
-    alpha = args.alpha
-    dropout_rate = args.dropout_rate
-    multi_rep_mode = args.multi_rep_mode
-    infonce_mode = args.infonce_mode
+    multi_rep_mode   = args.multi_rep_mode
+    infonce_mode     = args.infonce_mode
     contrastive_mode = args.contrastive_mode
-    gnn_mode = args.gnn_mode
-    agg_mode = args.agg_mode
+    gnn_mode         = args.gnn_mode
+    agg_mode         = args.agg_mode
+    pretrain_method  = args.pretrain_method
+    alpha            = args.alpha
+    beta             = args.beta
+    gamma            = args.gamma
+    temp_proto       = args.temp_proto
+    temp_echo        = args.temp_echo
+    temp_pop         = args.temp_pop
+    dataset_dir      = args.dataset_dir
+    glove_path       = args.glove_path
+    preserve_dir     = args.preserve_dir
+    val_only         = args.val_only
 
     if not os.path.exists(preserve_dir):
         os.makedirs(preserve_dir)
 
-    file1 = 'MINDsmall_train/news.tsv'
-    file2 = 'MINDsmall_dev/news.tsv'
-    file3 = 'MINDsmall_train/behaviors.tsv'
-    file4 = 'MINDsmall_dev/behaviors.tsv'
-    file5 = 'glove/glove.840B.300d.txt'
-    file6 = 'dummy.txt'
-    #file6 = '/MINDsmall_dev/cold_start_behaviors.tsv' #doesn't exist?
-    #file6 = '/home/wangshicheng/news_recommendation/MINDsmall_dev/normal_behaviors.tsv'
+    file1 = os.path.join(dataset_dir, 'MINDsmall_train/news.tsv')
+    file2 = os.path.join(dataset_dir, 'MINDsmall_dev/news.tsv')
+    file3 = os.path.join(dataset_dir, 'MINDsmall_train/behaviors.tsv')
+    file4 = os.path.join(dataset_dir, 'MINDsmall_dev/behaviors.tsv')
+    file5 = glove_path
+    file6 = os.path.join(dataset_dir, 'MINDsmall_dev/behaviors.tsv')  # dummy fallback
 
     data_module = DataProcess(file1, file2, file3, file4, file5, file6)
     news_title, news_abstract = data_module.process_train_val_news()
-    news_title, news_abstract = torch.LongTensor(news_title), torch.LongTensor(news_abstract)
-    
+    news_title  = torch.LongTensor(news_title)
+    news_abstract = torch.LongTensor(news_abstract)
+
+    # Popularity pools — must be called before pre_train_behaviors()
+    data_module.compute_popularity()
+
     entity_matrix = data_module.generate_entity_matrix()
     entity_dim = entity_matrix.size(1)
 
@@ -87,99 +124,173 @@ if __name__ == '__main__':
         word_matrix = data_module.load_glove()
 
     user_his = data_module.generate_user_his()
-    user_his = torch.LongTensor(np.array(list(user_his.values()), dtype = 'int32'))
-    print ('num_user: ', len(user_his))
-    
-    model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode)
-    device_ids = [0,1,2,3,4,5,6,7]
-    model = nn.DataParallel(model, device_ids = device_ids)
- 
-    #user_adj = []
-    #f = open('small_user_nei_sort.txt', 'r', encoding='utf-8')
-    #lines = f.readlines()
-    #for line in lines:
-    #    line = line.strip().split('\t')
-    #    user_adj.append([int(i) for i in line])
-    #user_adj = torch.LongTensor(np.array(user_adj, dtype = 'int32'))
-    #print ('user_adj.size: ', user_adj.size())
-    
+    user_his = torch.LongTensor(np.array(list(user_his.values()), dtype='int32'))
+    print('num_user: ', len(user_his))
 
-    model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode)
-    device_ids = [0,1,2,3,4,5,6,7]
-    model = nn.DataParallel(model, device_ids = device_ids)
-    
-    #model.load_state_dict(torch.load('/home/wangshicheng/news_recommendation/Final_edtion/title_abstract_edition/concat_dr0.0_prototype_other_user_nogat_soft_6_3_5_s/model_{}.pkl'.format(i + 1)))
-    #model.load_state_dict(torch.load('/home/wangshicheng/news_recommendation/Final_edtion/title_abstract_edition/sgd_other2_10_1_5_l_adam_val_2/model_6.pkl'))
-    model = model
-    
+    # --- Echo-Chamber Debiasing: pre-compute augmented user histories ---
+    # Generated when infonce_mode requires echo path.
+    user_his_echo = None
+    if infonce_mode in ('echo_chamber_debiased', 'all_combined'):
+        print('Generating echo-chamber user histories...')
+        user_his_echo_raw = data_module.generate_echo_user_his(echo_threshold=0.85)
+        user_his_echo = torch.LongTensor(np.array(list(user_his_echo_raw.values()), dtype='int32'))
+        print('user_his_echo.size: ', user_his_echo.size())
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print('Running on device:', device)
+
+    model = Multi_Rep_Predictor(
+        num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix,
+        num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode,
+        gnn_mode, agg_mode,
+        temp_proto=temp_proto, temp_echo=temp_echo, temp_pop=temp_pop
+    )
+    if torch.cuda.is_available():
+        model = nn.DataParallel(model)
+    model = model.to(device)
+
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    #optimizer = optim.SGD(model.parameters(), lr=0.01,momentum=0.1)
-    #optimizer = optim.Adamax(model.parameters(), lr=0.002)
-    
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # CosineAnnealingLR: decays lr smoothly from lr -> 1e-5 over all epochs
+    T_max = max(num_epoch * num_dataset, 1)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max, eta_min=1e-5)
+
     best_epoch = 0
-    min_loss = float('inf')
+    min_loss   = float('inf')
 
-    for n_d in range(num_dataset):
-        # training loop
-        [train_candidate, train_user, train_label] = data_module.pre_train_behaviors()
-        train_dataset = Data.TensorDataset(train_candidate, train_user, train_label)
-        train_loader = Data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
-        '''
-        for n_ep in range(num_epoch):
-            acc, all = 0, 0
-            t0 = time.time()
-            loss_per_epoch = []
+    if not val_only:
+        for n_d in range(num_dataset):
+            # pre_train_behaviors returns 6 tensors (3 base + 3 popularity triplet)
+            [train_candidate, train_user, train_label,
+             train_pop, train_unpop, train_diff] = data_module.pre_train_behaviors()
 
-            # batches from the training loader
-            # news titles and abstracts are obtained based on user behavior
-            # neighboring users and corresponding news titles and abstracts are obtained
-            # model set to training mode + gradients set to 0
-            # model saved after every epoch
-            for step, (train_candidate, train_user, train_label) in enumerate(train_loader):
-                t1 = time.time()
-                candidate_title, his_title, train_label = news_title[train_candidate], news_title[user_his[train_user]], train_label
-                candidate_title, his_title, train_label = Variable(candidate_title),Variable(his_title), Variable(train_label)
-                candidate_abstract, his_abstract  = news_abstract[train_candidate], news_abstract[user_his[train_user]]
-                candidate_abstract, his_abstract  = Variable(candidate_abstract),Variable(his_abstract)
-                print (candidate_title.size(), candidate_abstract.size())
+            train_dataset = Data.TensorDataset(
+                train_candidate, train_user, train_label,
+                train_pop, train_unpop, train_diff
+            )
+            train_loader = Data.DataLoader(
+                dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=2
+            )
 
-                #neighbor_user = user_adj[train_user]
-                #(neighbor_1, neighbor_2) = torch.split(neighbor_user, 1, dim = 1)
-                #neighbor_1, neighbor_2 = neighbor_1.squeeze(dim = 1), neighbor_2.squeeze(dim = 1)
-                
-                #nei1_title, nei1_abstract  = news_title[user_his[neighbor_1]].cuda(), news_abstract[user_his[neighbor_1]].cuda()
-                #nei1_title, nei1_abstract = Variable(nei1_title), Variable(nei1_abstract)
-                #nei2_title, nei2_abstract  = news_title[user_his[neighbor_2]].cuda(), news_abstract[user_his[neighbor_2]].cuda()
-                #nei2_title, nei2_abstract = Variable(nei2_title), Variable(nei2_abstract)
+            for n_ep in range(num_epoch):
+                curr_epoch = n_d * num_epoch + n_ep + 1
 
-                model.train()
-                optimizer.zero_grad()
+                # Open per-epoch CSV log
+                log_path   = os.path.join(preserve_dir, f'epoch_{curr_epoch:03d}_loss_log.csv')
+                log_file   = open(log_path, 'w', newline='', encoding='utf-8')
+                log_writer = csv.writer(log_file)
+                log_writer.writerow([
+                    'epoch', 'step',
+                    'predictor_loss', 'proto_CL_loss',
+                    'echo_CL_loss', 'pop_CL_loss',
+                    'total_loss', 'mean_loss',
+                    'grad_norm', 'lr', 'step_time_s'
+                ])
+                log_file.flush()
 
-                #predictor_logits, user_infoNCE_logits = model(candidate_title, candidate_abstract, his_title, his_abstract, neighbor_title, neighbor_abstract)
-                predictor_logits, user_infoNCE_logits = model(candidate_title, candidate_abstract, his_title, his_abstract)
-                predictor_loss = criterion(predictor_logits, train_label)
-                
-                if contrastive_mode == 'USER':
-                    user_infoNCE_labels = torch.zeros(len(user_infoNCE_logits), dtype=torch.long)
-                    user_infoNCE_loss = F.cross_entropy(user_infoNCE_logits, user_infoNCE_labels)
-                    print ('predictor_loss: ', predictor_loss.data.item(), 'user_infoNCE_loss: ', user_infoNCE_loss.data.item())
-                    loss = predictor_loss + alpha * user_infoNCE_loss
-                else:
-                    print ('predictor_loss: ', predictor_loss.data.item())
-                    loss = predictor_loss
-                    
-                loss.backward()
-                optimizer.step()
+                t0 = time.time()
+                loss_per_epoch = []
 
-                loss_per_epoch.append(loss.data.item())
-                print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'step: {:04d}'.format(step + 1), 'loss: {:.4f}'.format(np.mean(loss_per_epoch)), 'time: {:.4f}'.format(time.time() - t1))
+                for step, (train_candidate, train_user, train_label,
+                            train_pop, train_unpop, train_diff) in enumerate(train_loader):
+                    t1 = time.time()
 
-            torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(n_d * num_epoch + n_ep + 1))
-            print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'time: {:.4f}'.format(time.time() - t0))
-        del train_candidate, train_user, train_label
-    '''
-    print("TRAINING DONE-------------------------------------------------------------------------------------------------------------------------------------------------")
+                    # Real history
+                    candidate_title   = Variable(news_title[train_candidate].to(device))
+                    his_title         = Variable(news_title[user_his[train_user]].to(device))
+                    candidate_abstract = Variable(news_abstract[train_candidate].to(device))
+                    his_abstract      = Variable(news_abstract[user_his[train_user]].to(device))
+                    train_label       = Variable(train_label.to(device))
+
+                    # Echo history (only if echo path is active)
+                    echo_his_title    = None
+                    echo_his_abstract = None
+                    if user_his_echo is not None:
+                        echo_his_title    = Variable(news_title[user_his_echo[train_user]].to(device))
+                        echo_his_abstract = Variable(news_abstract[user_his_echo[train_user]].to(device))
+
+                    # Popularity triplet (always fetched; model ignores when mode doesn't need it)
+                    pop_title    = Variable(news_title[train_pop].unsqueeze(1).to(device))
+                    pop_abstract = Variable(news_abstract[train_pop].unsqueeze(1).to(device))
+                    unpop_title    = Variable(news_title[train_unpop].unsqueeze(1).to(device))
+                    unpop_abstract = Variable(news_abstract[train_unpop].unsqueeze(1).to(device))
+                    diff_title    = Variable(news_title[train_diff].unsqueeze(1).to(device))
+                    diff_abstract = Variable(news_abstract[train_diff].unsqueeze(1).to(device))
+
+                    model.train()
+                    optimizer.zero_grad()
+
+                    predictor_logits, logits_dict = model(
+                        candidate_title, candidate_abstract,
+                        his_title, his_abstract,
+                        echo_his_title, echo_his_abstract,
+                        pop_title, pop_abstract,
+                        unpop_title, unpop_abstract,
+                        diff_title, diff_abstract
+                    )
+
+                    predictor_loss = criterion(predictor_logits, train_label)
+                    loss           = predictor_loss
+                    proto_val = echo_val = pop_val = 0.0
+
+                    if contrastive_mode == 'USER':
+                        # --- prototype_self loss (always active) ---
+                        proto_labels = torch.zeros(len(logits_dict['proto']), dtype=torch.long, device=device)
+                        proto_loss   = F.cross_entropy(logits_dict['proto'], proto_labels)
+                        proto_val    = proto_loss.item()
+                        loss         = loss + alpha * proto_loss
+
+                        # --- echo_chamber_debiased loss ---
+                        if logits_dict['echo'] is not None:
+                            echo_labels = torch.zeros(len(logits_dict['echo']), dtype=torch.long, device=device)
+                            echo_loss   = F.cross_entropy(logits_dict['echo'], echo_labels)
+                            echo_val    = echo_loss.item()
+                            loss        = loss + beta * echo_loss
+
+                        # --- popularity_debiased loss (mask sentinel rows) ---
+                        if logits_dict['pop'] is not None:
+                            valid_rows = (logits_dict['pop'].abs().sum(dim=-1) > 0)
+                            if valid_rows.any():
+                                pop_labels = torch.zeros(valid_rows.sum(), dtype=torch.long, device=device)
+                                pop_loss   = F.cross_entropy(logits_dict['pop'][valid_rows], pop_labels)
+                                pop_val    = pop_loss.item()
+                                loss       = loss + gamma * pop_loss
+
+                    print('predictor: {:.4f}  proto_CL: {:.4f}  echo_CL: {:.4f}  pop_CL: {:.4f}  total: {:.4f}'.format(
+                        predictor_loss.item(), proto_val, echo_val, pop_val, loss.item()))
+
+                    loss.backward()
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0).item()
+                    optimizer.step()
+
+                    step_time = time.time() - t1
+                    loss_per_epoch.append(loss.item())
+                    curr_step = step + 1
+                    curr_mean = float(np.mean(loss_per_epoch))
+                    curr_lr   = optimizer.param_groups[0]['lr']
+
+                    log_writer.writerow([
+                        curr_epoch, curr_step,
+                        round(predictor_loss.item(), 6), round(proto_val, 6),
+                        round(echo_val, 6), round(pop_val, 6),
+                        round(loss.item(), 6), round(curr_mean, 6),
+                        round(grad_norm, 6), curr_lr, round(step_time, 4)
+                    ])
+                    log_file.flush()
+
+                    print('epoch: {:04d}  step: {:04d}  mean_loss: {:.4f}  time: {:.4f}'.format(
+                        curr_epoch, curr_step, curr_mean, step_time))
+
+                scheduler.step()
+                log_file.close()
+                torch.save(model.state_dict(), os.path.join(preserve_dir, 'model_{}.pkl'.format(curr_epoch)))
+                print('epoch: {:04d}  epoch_time: {:.4f}'.format(curr_epoch, time.time() - t0))
+
+            del train_candidate, train_user, train_label, train_pop, train_unpop, train_diff
+    else:
+        print('Skipping training, starting validation from saved checkpoint...')
+
+    print('TRAINING DONE' + '-' * 80)
     # validation and evaluation
     
     # cand articles, user ids, labels (0/1), number of candidate articles for that user
