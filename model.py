@@ -498,8 +498,9 @@ class Multi_Rep_Predictor(nn.Module):
 			echo_rep      = echo_user_rep                                               # [B, K, D]
 			# dominant interest = prototype with highest user attention score
 			with torch.no_grad():
+				mean_user_rep = target_user_rep.mean(dim=1)  # [B, D]
 				scores = torch.matmul(
-					F.normalize(target_user_rep, p=2, dim=-1),
+					F.normalize(mean_user_rep, p=2, dim=-1),
 					F.normalize(self.prototype,  p=2, dim=-1).t()
 				)  # [B, K]
 				dominant_indices = scores.argmax(dim=1)  # [B]
