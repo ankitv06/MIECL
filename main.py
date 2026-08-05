@@ -68,6 +68,10 @@ if __name__ == '__main__':
     # --- Misc ---
     parser.add_argument('--val_only', action='store_true',
                         help='Skip training and go straight to validation')
+    parser.add_argument('--val_batch_multiplier', type=int, default=2,
+                        help='Val batch size = batch_size * val_batch_multiplier. '
+                             'Lower this (e.g. 1 or 2) if validation OOMs. '
+                             'Default 2 is safe for combined branch on 15-20GB GPUs.')
     args = parser.parse_args()
 
     num_epoch        = args.num_epoch
@@ -97,6 +101,7 @@ if __name__ == '__main__':
     glove_path       = args.glove_path
     preserve_dir     = args.preserve_dir
     val_only         = args.val_only
+    val_batch_multiplier = args.val_batch_multiplier
 
     if not os.path.exists(preserve_dir):
         os.makedirs(preserve_dir)
@@ -333,7 +338,7 @@ if __name__ == '__main__':
     subset_dataset = Subset(val_dataset, subset_indices)
 
     # Create a new DataLoader with the subset dataset
-    subset_loader = Data.DataLoader(dataset=subset_dataset, batch_size=batch_size * 3, shuffle=False, num_workers=2)
+    subset_loader = Data.DataLoader(dataset=subset_dataset, batch_size=batch_size * val_batch_multiplier, shuffle=False, num_workers=2)
     val_loader = subset_loader
 
     #val_candidate = np.array_split(val_candidate, 8000)     # [7600, 1800] , [11400, 1200], [22800, 600], [15200, 900]
