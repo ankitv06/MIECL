@@ -345,14 +345,7 @@ if __name__ == '__main__':
 
     
     val_dataset = Data.TensorDataset(val_candidate, val_user, val_label)
-    #val_loader = Data.DataLoader(dataset=val_dataset, batch_size=batch_size * 3, shuffle=False, num_workers=2)
-
-    subset_indices = range(32760)  # Choose the indices of the entries you want to include
-    subset_dataset = Subset(val_dataset, subset_indices)
-
-    # Create a new DataLoader with the subset dataset
-    subset_loader = Data.DataLoader(dataset=subset_dataset, batch_size=batch_size * 3, shuffle=False, num_workers=2)
-    val_loader = subset_loader
+    val_loader = Data.DataLoader(dataset=val_dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=2)
 
     #val_candidate = np.array_split(val_candidate, 8000)     # [7600, 1800] , [11400, 1200], [22800, 600], [15200, 900]
     #val_user = np.array_split(val_user, 8000)       # [9120, 1500] , [34200, 400], [30400, 450]
