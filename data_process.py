@@ -330,7 +330,7 @@ class DataProcess():
         print ('val_user.size:', self.val_user.size()) # user ids #2658091
         print('len(val_index): ', len(self.val_index)) # number of candidate articles for that user #70938
 
-        self.val_index = self.val_index[:900]
+        # removed val_index[:900] limit
         print('process val behaviors finished')
         return [self.val_candidate, self.val_user, self.val_label, self.val_index]
 
@@ -386,7 +386,7 @@ class DataProcess():
         lines = f.readlines()
         for line in lines:
             if len(line) == 0:
-                break
+                continue
             line = line.strip().split()
             if len(line) != 301:
                 continue

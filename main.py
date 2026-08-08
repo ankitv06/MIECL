@@ -41,6 +41,14 @@ if __name__ == '__main__':
     parser.add_argument('--contrastive_mode', type=str, default='USER')
     parser.add_argument('--gnn_mode', type=str, default='nogat')
     parser.add_argument('--agg_mode', type=str, default='soft')
+    parser.add_argument('--dataset_dir', type=str, default='dataset',
+                        help='Root folder containing MINDsmall_train/, MINDsmall_dev/, glove/')
+    parser.add_argument('--eval_only', action='store_true',
+                        help='Skip training and go straight to validation')
+    parser.add_argument('--eval_epoch', type=int, default=-1,
+                        help='Specific epoch to evaluate (e.g., 200). If -1, evaluates all.')
+    parser.add_argument('--eval_batch_size', type=int, default=32,
+                        help='Batch size to use during evaluation to prevent OOM (default 32).')
     args = parser.parse_args()
 
     num_epoch = args.num_epoch
@@ -63,17 +71,17 @@ if __name__ == '__main__':
     gnn_mode = args.gnn_mode
     agg_mode = args.agg_mode
 
+    dataset_dir = args.dataset_dir
+
     if not os.path.exists(preserve_dir):
         os.makedirs(preserve_dir)
 
-    file1 = 'MINDsmall_train/news.tsv'
-    file2 = 'MINDsmall_dev/news.tsv'
-    file3 = 'MINDsmall_train/behaviors.tsv'
-    file4 = 'MINDsmall_dev/behaviors.tsv'
-    file5 = 'glove/glove.840B.300d.txt'
+    file1 = os.path.join(dataset_dir, 'MINDsmall_train/news.tsv')
+    file2 = os.path.join(dataset_dir, 'MINDsmall_dev/news.tsv')
+    file3 = os.path.join(dataset_dir, 'MINDsmall_train/behaviors.tsv')
+    file4 = os.path.join(dataset_dir, 'MINDsmall_dev/behaviors.tsv')
+    file5 = os.path.join(dataset_dir, 'glove.840B.300d.txt')
     file6 = 'dummy.txt'
-    #file6 = '/MINDsmall_dev/cold_start_behaviors.tsv' #doesn't exist?
-    #file6 = '/home/wangshicheng/news_recommendation/MINDsmall_dev/normal_behaviors.tsv'
 
     data_module = DataProcess(file1, file2, file3, file4, file5, file6)
     news_title, news_abstract = data_module.process_train_val_news()
@@ -104,9 +112,11 @@ if __name__ == '__main__':
     #print ('user_adj.size: ', user_adj.size())
     
 
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode)
-    device_ids = [0,1,2,3,4,5,6,7]
-    model = nn.DataParallel(model, device_ids = device_ids)
+    model = model.to(device)
+    if torch.cuda.is_available():
+        model = nn.DataParallel(model)
     
     #model.load_state_dict(torch.load('/home/wangshicheng/news_recommendation/Final_edtion/title_abstract_edition/concat_dr0.0_prototype_other_user_nogat_soft_6_3_5_s/model_{}.pkl'.format(i + 1)))
     #model.load_state_dict(torch.load('/home/wangshicheng/news_recommendation/Final_edtion/title_abstract_edition/sgd_other2_10_1_5_l_adam_val_2/model_6.pkl'))
@@ -120,28 +130,25 @@ if __name__ == '__main__':
     best_epoch = 0
     min_loss = float('inf')
 
-    for n_d in range(num_dataset):
-        # training loop
-        [train_candidate, train_user, train_label] = data_module.pre_train_behaviors()
-        train_dataset = Data.TensorDataset(train_candidate, train_user, train_label)
-        train_loader = Data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
-        '''
-        for n_ep in range(num_epoch):
-            acc, all = 0, 0
-            t0 = time.time()
-            loss_per_epoch = []
+    if not args.eval_only:
+        for n_d in range(num_dataset):
+            # training loop
+            [train_candidate, train_user, train_label] = data_module.pre_train_behaviors()
+            train_dataset = Data.TensorDataset(train_candidate, train_user, train_label)
+            train_loader = Data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+            
+            for n_ep in range(num_epoch):
+                acc, all = 0, 0
+                t0 = time.time()
+                loss_per_epoch = []
 
-            # batches from the training loader
-            # news titles and abstracts are obtained based on user behavior
-            # neighboring users and corresponding news titles and abstracts are obtained
-            # model set to training mode + gradients set to 0
-            # model saved after every epoch
-            for step, (train_candidate, train_user, train_label) in enumerate(train_loader):
-                t1 = time.time()
-                candidate_title, his_title, train_label = news_title[train_candidate], news_title[user_his[train_user]], train_label
-                candidate_title, his_title, train_label = Variable(candidate_title),Variable(his_title), Variable(train_label)
-                candidate_abstract, his_abstract  = news_abstract[train_candidate], news_abstract[user_his[train_user]]
-                candidate_abstract, his_abstract  = Variable(candidate_abstract),Variable(his_abstract)
+                # batches from the training loader
+                for step, (train_candidate, train_user, train_label) in enumerate(train_loader):
+                    t1 = time.time()
+                    candidate_title, his_title, train_label = news_title[train_candidate].to(device), news_title[user_his[train_user]].to(device), train_label.to(device)
+                    candidate_title, his_title, train_label = Variable(candidate_title),Variable(his_title), Variable(train_label)
+                    candidate_abstract, his_abstract  = news_abstract[train_candidate].to(device), news_abstract[user_his[train_user]].to(device)
+                    candidate_abstract, his_abstract  = Variable(candidate_abstract),Variable(his_abstract)
                 print (candidate_title.size(), candidate_abstract.size())
 
                 #neighbor_user = user_adj[train_user]
@@ -161,7 +168,7 @@ if __name__ == '__main__':
                 predictor_loss = criterion(predictor_logits, train_label)
                 
                 if contrastive_mode == 'USER':
-                    user_infoNCE_labels = torch.zeros(len(user_infoNCE_logits), dtype=torch.long)
+                    user_infoNCE_labels = torch.zeros(len(user_infoNCE_logits), dtype=torch.long, device=device)
                     user_infoNCE_loss = F.cross_entropy(user_infoNCE_logits, user_infoNCE_labels)
                     print ('predictor_loss: ', predictor_loss.data.item(), 'user_infoNCE_loss: ', user_infoNCE_loss.data.item())
                     loss = predictor_loss + alpha * user_infoNCE_loss
@@ -178,9 +185,12 @@ if __name__ == '__main__':
             torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(n_d * num_epoch + n_ep + 1))
             print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'time: {:.4f}'.format(time.time() - t0))
         del train_candidate, train_user, train_label
-    '''
+    else:
+        print("Skipping training, starting validation from saved checkpoint...")
+
     print("TRAINING DONE-------------------------------------------------------------------------------------------------------------------------------------------------")
     # validation and evaluation
+    torch.cuda.empty_cache()
     
     # cand articles, user ids, labels (0/1), number of candidate articles for that user
     [val_candidate, val_user, val_label, val_index] = data_module.pre_val_behaviors(file4)
@@ -197,46 +207,36 @@ if __name__ == '__main__':
     f.close()    
 
     truth_file = open(preserve_dir + '/truth.txt', 'w')
-    # number of val users
-    print(len(val_index))
-    for i in val_index:
-        # val index contains number of candidate articles
-        # val labels contains the labels adn convert to list
-        # if index =3, select the first 3 labels
+    for idx, i in enumerate(val_index):
         i_label = val_label[i[0]: i[1]].data.numpy().tolist()
-        # this is just indexing - 0,1,2..
-        truth_file.write(str(val_index.index(i)) + ' ' + '[')
+        truth_file.write(str(idx) + ' ' + '[')
         for item in i_label[:-1]:
-            # write down the labels
             truth_file.write(str(item) + ',')
-        # close the bracket
         truth_file.write(str(i_label[-1]) + ']' + '\n')
     truth_file.flush()
     truth_file.close()
 
     
     val_dataset = Data.TensorDataset(val_candidate, val_user, val_label)
-    #val_loader = Data.DataLoader(dataset=val_dataset, batch_size=batch_size * 3, shuffle=False, num_workers=2)
+    val_loader = Data.DataLoader(dataset=val_dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=2)
 
-    subset_indices = range(32760)  # Choose the indices of the entries you want to include
-    subset_dataset = Subset(val_dataset, subset_indices)
+    epochs_to_eval = range(1, num_dataset * num_epoch + 1)
+    if args.eval_epoch > 0:
+        epochs_to_eval = [args.eval_epoch]
 
-    # Create a new DataLoader with the subset dataset
-    subset_loader = Data.DataLoader(dataset=subset_dataset, batch_size=batch_size * 3, shuffle=False, num_workers=2)
-    val_loader = subset_loader
-
-    #val_candidate = np.array_split(val_candidate, 8000)     # [7600, 1800] , [11400, 1200], [22800, 600], [15200, 900]
-    #val_user = np.array_split(val_user, 8000)       # [9120, 1500] , [34200, 400], [30400, 450]
-    # [90, 26600] [400, 6600]
-
-    for n_d in range(num_dataset * num_epoch):
+    for epoch_idx in epochs_to_eval:
         #model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode)
         #loaded_dict = torch.load(preserve_dir + '/model_{}.pkl'.format(n_d + 1))
         #model = nn.DataParallel(model, device_ids = [0])
         #model.state_dict = loaded_dict
         #print (next(model.parameters()).device)
 
-        model.load_state_dict(torch.load(preserve_dir + '/model_{}.pkl'.format(n_d + 1)))
+        checkpoint_path = preserve_dir + '/model_{}.pkl'.format(epoch_idx)
+        if not os.path.exists(checkpoint_path):
+            print("Checkpoint not found:", checkpoint_path)
+            continue
+            
+        model.load_state_dict(torch.load(checkpoint_path))
         model = model
         model.eval()
         val_score = []
@@ -251,13 +251,10 @@ if __name__ == '__main__':
                 print ('index_of_batch_valdataset: ', step)
                 #print ('index_of_batch_valdataset: ', i)
 
-                #temp_candidate_title, temp_his_title = news_title[torch.LongTensor(val_candidate[i])].unsqueeze(dim = 1).cuda(), news_title[user_his[torch.LongTensor(val_user[i])]].cuda()
-                candidate_title, his_title = news_title[val_candidate].unsqueeze(dim = 1), news_title[user_his[val_user]]
+                candidate_title, his_title = news_title[val_candidate].unsqueeze(dim = 1).to(device), news_title[user_his[val_user]].to(device)
                 candidate_title, his_title = Variable(candidate_title), Variable(his_title)
-                #temp_candidate_abstract, temp_his_abstract = news_abstract[torch.LongTensor(val_candidate[i])].unsqueeze(dim = 1).cuda(), news_abstract[user_his[torch.LongTensor(val_user[i])]].cuda()
-                candidate_abstract, his_abstract = news_abstract[val_candidate].unsqueeze(dim = 1), news_abstract[user_his[val_user]]
+                candidate_abstract, his_abstract = news_abstract[val_candidate].unsqueeze(dim = 1).to(device), news_abstract[user_his[val_user]].to(device)
                 candidate_abstract, his_abstract = Variable(candidate_abstract), Variable(his_abstract)
-                print (candidate_title.size(), his_title.size(), candidate_abstract.size(), his_abstract.size())
 
                 #neighbor_user = user_adj[val_user]
                 #neighbor_1, neighbor_2 = torch.split(neighbor_user, 1, dim = 1)
@@ -292,43 +289,35 @@ if __name__ == '__main__':
         #val_score = pickle.load(f2)
         #val_label = pickle.load(f3)
 
-        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(n_d + 1), 'w')
-        print ('process predict_file_{} start'.format(n_d + 1))
+        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(epoch_idx), 'w')
+        print ('process predict_file_{} start'.format(epoch_idx))
 
-        # every term in val index represents the number of candidate articles associated with every user
-        #print('val score: ', val_score)
-    # )e one pair of indices - a list
         cnt = 0
-        for i in val_index:
-            # extract the list of scores for all the correponding news artciles using the obtained indices
+        for idx, i in enumerate(val_index):
             i_score = [item for item in val_score[i[0]: i[1]]]
-            # sort the scores
             i_score_sort = sorted(i_score, reverse=True)
             
             rank = []
             for item in i_score:
-                # obtain the rank for the articles based on their position in the sorted score list
                 rank.append(i_score_sort.index(item) + 1)
-            predict_file.write(str(val_index.index(i)) + ' ' + '[')
-            print(rank)
+            predict_file.write(str(idx) + ' ' + '[')
             for item in rank[:-1]:
                 predict_file.write(str(item) + ',')
             predict_file.write(str(rank[-1]) + ']' + '\n')
 
         predict_file.flush()
         predict_file.close()
-        print ('process predict_file_{} finished'.format(n_d + 1))
+        print ('process predict_file_{} finished'.format(epoch_idx))
         
-        print ('calculate {}_th auc/mrr/ndcg start'.format(n_d + 1))
-        output_filename = preserve_dir + '/scores_{}.txt'.format(n_d + 1)
+        print ('calculate {}_th auc/mrr/ndcg start'.format(epoch_idx))
+        output_filename = preserve_dir + '/scores_{}.txt'.format(epoch_idx)
         output_file = open(output_filename, 'w')
 
         truth_file = open(preserve_dir + '/truth.txt', 'r')
-        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(n_d + 1), 'r')
+        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(epoch_idx), 'r')
 
         auc, mrr, ndcg, ndcg10 = scoring(truth_file, predict_file)
 
         output_file.write("AUC:{:.4f}\nMRR:{:.4f}\nnDCG@5:{:.4f}\nnDCG@10:{:.4f}".format(auc, mrr, ndcg, ndcg10))
         output_file.close()
-        print ('calculate {}_th auc/mrr/ndcg finished'.format(n_d + 1))
-        
+        print ('calculate {}_th auc/mrr/ndcg finished'.format(epoch_idx))
