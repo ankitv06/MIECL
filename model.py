@@ -286,10 +286,10 @@ class InfoNCE(nn.Module):
 		# 正负样本1:1，正样本为对应兴趣原型向量，负样本为随机抽取某兴趣条件下新闻语义表示
 		# anchor: n_i_k, positive: p_k, negative: n_i_k'
 			# to optimizie target user multi rep
-			positive_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1, ))
-			negative_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1, ))
+			positive_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1, )).to(multi_rep.device)
+			negative_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1, )).to(multi_rep.device)
 			while (positive_index == negative_index):
-				negative_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1,))
+				negative_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1,)).to(multi_rep.device)
 
 			# multi rep - target user rep 
 			anchor = torch.index_select(multi_rep, dim = 1, index = positive_index)    # [30, 1, 400]
