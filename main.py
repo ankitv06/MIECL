@@ -49,8 +49,8 @@ if __name__ == '__main__':
     parser.add_argument('--val_only', action='store_true', help='Skip training and run only validation')
     parser.add_argument('--eval_only', action='store_true',
                         help='Skip training and only run evaluation on saved checkpoints.')
-    parser.add_argument('--eval_epoch', type=int, default=-1,
-                        help='Specific epoch to evaluate (e.g., 200). If -1, evaluates all.')
+    parser.add_argument('--eval_epochs', type=int, nargs='+', default=[],
+                        help='Specific epochs to evaluate (e.g., --eval_epochs 1 20 200). If empty, evaluates all.
     parser.add_argument('--eval_batch_size', type=int, default=32,
                         help='Batch size to use during evaluation to prevent OOM (default 32).')
     args = parser.parse_args()
@@ -272,8 +272,8 @@ if __name__ == '__main__':
 
     # Determine which epochs to evaluate
     epochs_to_eval = range(1, num_dataset * num_epoch + 1)
-    if args.eval_epoch > 0:
-        epochs_to_eval = [args.eval_epoch]
+    if args.eval_epochs:
+        epochs_to_eval = args.eval_epochs
 
     for epoch_idx in epochs_to_eval:
         checkpoint_path = preserve_dir + '/model_{}.pkl'.format(epoch_idx)
