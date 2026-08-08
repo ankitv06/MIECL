@@ -257,33 +257,18 @@ if __name__ == '__main__':
     f.close()    
 
     truth_file = open(preserve_dir + '/truth.txt', 'w')
-    # number of val users
-    print(len(val_index))
-    for i in val_index:
-        # val index contains number of candidate articles
-        # val labels contains the labels adn convert to list
-        # if index =3, select the first 3 labels
+    for idx, i in enumerate(val_index):
         i_label = val_label[i[0]: i[1]].data.numpy().tolist()
-        # this is just indexing - 0,1,2..
-        truth_file.write(str(val_index.index(i)) + ' ' + '[')
+        truth_file.write(str(idx) + ' ' + '[')
         for item in i_label[:-1]:
-            # write down the labels
             truth_file.write(str(item) + ',')
-        # close the bracket
         truth_file.write(str(i_label[-1]) + ']' + '\n')
     truth_file.flush()
     truth_file.close()
 
     
     val_dataset = Data.TensorDataset(val_candidate, val_user, val_label)
-    #val_loader = Data.DataLoader(dataset=val_dataset, batch_size=batch_size * 3, shuffle=False, num_workers=2)
-
-    subset_indices = range(32760)  # Choose the indices of the entries you want to include
-    subset_dataset = Subset(val_dataset, subset_indices)
-
-    # Create a new DataLoader with the subset dataset using eval_batch_size
-    subset_loader = Data.DataLoader(dataset=subset_dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=2)
-    val_loader = subset_loader
+    val_loader = Data.DataLoader(dataset=val_dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=2)
 
     # Determine which epochs to evaluate
     epochs_to_eval = range(1, num_dataset * num_epoch + 1)
@@ -306,33 +291,14 @@ if __name__ == '__main__':
             # score evaluation done batchwise
             # then val index is used to extract the scores relevant to the user
             for step, (val_candidate, val_user, val_label) in enumerate(val_loader):
-            #for i in range(len(val_candidate)):
                 t1 = time.time()
                 print ('index_of_batch_valdataset: ', step)
-                #print ('index_of_batch_valdataset: ', i)
 
-                #temp_candidate_title, temp_his_title = news_title[torch.LongTensor(val_candidate[i])].unsqueeze(dim = 1).cuda(), news_title[user_his[torch.LongTensor(val_user[i])]].cuda()
                 candidate_title, his_title = news_title[val_candidate].unsqueeze(dim = 1).to(device), news_title[user_his[val_user]].to(device)
                 candidate_title, his_title = Variable(candidate_title), Variable(his_title)
                 candidate_abstract, his_abstract = news_abstract[val_candidate].unsqueeze(dim = 1).to(device), news_abstract[user_his[val_user]].to(device)
                 candidate_abstract, his_abstract = Variable(candidate_abstract), Variable(his_abstract)
                 print (candidate_title.size(), his_title.size(), candidate_abstract.size(), his_abstract.size())
-
-                #neighbor_user = user_adj[val_user]
-                #neighbor_1, neighbor_2 = torch.split(neighbor_user, 1, dim = 1)
-                #neighbor_1, neighbor_2 = neighbor_1.squeeze(dim = 1), neighbor_2.squeeze(dim = 1)
-                
-                #nei1_title, nei1_abstract  = news_title[user_his[neighbor_1]].cuda(), news_abstract[user_his[neighbor_1]].cuda()
-                #nei1_title, nei1_abstract = Variable(nei1_title), Variable(nei1_abstract)
-                #nei2_title, nei2_abstract  = news_title[user_his[neighbor_2]].cuda(), news_abstract[user_his[neighbor_2]].cuda()
-                #nei2_title, nei2_abstract = Variable(nei2_title), Variable(nei2_abstract)
-                #print (nei1_title.size(), nei1_abstract.size(), nei2_title.size(), nei2_abstract.size())
-
-                #neighbor_user = user_adj[torch.LongTensor(val_user[i])].reshape(-1, 1)
-                #neighbor_user = user_adj[val_user].reshape(-1, 1)
-                #neighbor_title, neighbor_abstract  = news_title[user_his[neighbor_user]].squeeze(dim = 1).cuda(), news_abstract[user_his[neighbor_user]].squeeze(dim = 1).cuda()
-                #neighbor_title, neighbor_abstract = Variable(neighbor_title), Variable(neighbor_abstract)
-                #print (neighbor_title.size(), neighbor_abstract.size())
 
                 predictor_logits, _, __ = model(candidate_title, candidate_abstract, his_title, his_abstract)
                 # prob of clicking on that article
@@ -343,22 +309,11 @@ if __name__ == '__main__':
         pickle.dump(val_score, f)
         f.close()
 
-        #f1 = open(preserve_dir + '/val_index.pkl', 'rb')
-        #f2 = open(preserve_dir + '/val_score_{}.pkl'.format(epoch_idx), 'rb')
-        #f3 = open(preserve_dir + '/val_label.pkl', 'rb')
-
-        #val_index = pickle.load(f1)
-        #val_score = pickle.load(f2)
-        #val_label = pickle.load(f3)
-
         predict_file = open(preserve_dir + '/prediction_{}.txt'.format(epoch_idx), 'w')
         print ('process predict_file_{} start'.format(epoch_idx))
 
-        # every term in val index represents the number of candidate articles associated with every user
-        #print('val score: ', val_score)
-    # )e one pair of indices - a list
         cnt = 0
-        for i in val_index:
+        for idx, i in enumerate(val_index):
             # extract the list of scores for all the correponding news artciles using the obtained indices
             i_score = [item for item in val_score[i[0]: i[1]]]
             # sort the scores
@@ -368,8 +323,7 @@ if __name__ == '__main__':
             for item in i_score:
                 # obtain the rank for the articles based on their position in the sorted score list
                 rank.append(i_score_sort.index(item) + 1)
-            predict_file.write(str(val_index.index(i)) + ' ' + '[')
-            print(rank)
+            predict_file.write(str(idx) + ' ' + '[')
             for item in rank[:-1]:
                 predict_file.write(str(item) + ',')
             predict_file.write(str(rank[-1]) + ']' + '\n')
