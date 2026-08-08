@@ -42,6 +42,14 @@ if __name__ == '__main__':
     parser.add_argument('--contrastive_mode', type=str, default='USER')
     parser.add_argument('--gnn_mode', type=str, default='nogat')
     parser.add_argument('--agg_mode', type=str, default='soft')
+    parser.add_argument('--dataset_dir', type=str, default='dataset',
+                        help='Root folder containing MINDsmall_train/, MINDsmall_dev/, glove/')
+    parser.add_argument('--eval_only', action='store_true',
+                        help='Skip training and go straight to validation')
+    parser.add_argument('--eval_epoch', type=int, default=-1,
+                        help='Specific epoch to evaluate (e.g., 200). If -1, evaluates all.')
+    parser.add_argument('--eval_batch_size', type=int, default=32,
+                        help='Batch size to use during evaluation to prevent OOM (default 32).')
     args = parser.parse_args()
 
     num_epoch = args.num_epoch
@@ -64,17 +72,17 @@ if __name__ == '__main__':
     gnn_mode = args.gnn_mode
     agg_mode = args.agg_mode
 
+    dataset_dir = args.dataset_dir
+
     if not os.path.exists(preserve_dir):
         os.makedirs(preserve_dir)
 
-    file1 = 'MINDsmall_train/news.tsv'
-    file2 = 'MINDsmall_dev/news.tsv'
-    file3 = 'MINDsmall_train/behaviors.tsv'
-    file4 = 'MINDsmall_dev/behaviors.tsv'
-    file5 = 'glove/glove.840B.300d.txt'
+    file1 = os.path.join(dataset_dir, 'MINDsmall_train/news.tsv')
+    file2 = os.path.join(dataset_dir, 'MINDsmall_dev/news.tsv')
+    file3 = os.path.join(dataset_dir, 'MINDsmall_train/behaviors.tsv')
+    file4 = os.path.join(dataset_dir, 'MINDsmall_dev/behaviors.tsv')
+    file5 = os.path.join(dataset_dir, 'glove.840B.300d.txt')
     file6 = 'dummy.txt'
-    #file6 = '/MINDsmall_dev/cold_start_behaviors.tsv' #doesn't exist?
-    #file6 = '/home/wangshicheng/news_recommendation/MINDsmall_dev/normal_behaviors.tsv'
 
     data_module = DataProcess(file1, file2, file3, file4, file5, file6)
     news_title, news_abstract = data_module.process_train_val_news()
@@ -139,6 +147,9 @@ if __name__ == '__main__':
     min_loss = float('inf')
 
     for n_d in range(num_dataset):
+        if args.eval_only:
+            print("Skipping training, starting validation from saved checkpoint...")
+            break
         # training loop — pre_train_behaviors now returns 6 tensors
         [train_candidate, train_user, train_label,
          train_pop, train_unpop, train_diff] = data_module.pre_train_behaviors()
@@ -308,6 +319,7 @@ if __name__ == '__main__':
             print('Loss log saved: {}'.format(log_path))
 
         del train_candidate, train_user, train_label
+
     print("TRAINING DONE-------------------------------------------------------------------------------------------------------------------------------------------------")
     # validation and evaluation
     
@@ -347,14 +359,23 @@ if __name__ == '__main__':
     #val_user = np.array_split(val_user, 8000)       # [9120, 1500] , [34200, 400], [30400, 450]
     # [90, 26600] [400, 6600]
 
-    for n_d in range(num_dataset * num_epoch):
+    epochs_to_eval = range(1, num_dataset * num_epoch + 1)
+    if args.eval_epoch > 0:
+        epochs_to_eval = [args.eval_epoch]
+
+    for epoch_idx in epochs_to_eval:
         #model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode)
-        #loaded_dict = torch.load(preserve_dir + '/model_{}.pkl'.format(n_d + 1))
+        #loaded_dict = torch.load(preserve_dir + '/model_{}.pkl'.format(epoch_idx))
         #model = nn.DataParallel(model, device_ids = [0])
         #model.state_dict = loaded_dict
         #print (next(model.parameters()).device)
+        
+        checkpoint_path = preserve_dir + '/model_{}.pkl'.format(epoch_idx)
+        if not os.path.exists(checkpoint_path):
+            print("Checkpoint not found:", checkpoint_path)
+            continue
 
-        model.load_state_dict(torch.load(preserve_dir + '/model_{}.pkl'.format(n_d + 1)))
+        model.load_state_dict(torch.load(checkpoint_path))
         model = model
         model.eval()
         val_score = []
@@ -398,20 +419,20 @@ if __name__ == '__main__':
                 score = torch.sigmoid(predictor_logits).cpu().data.numpy()
                 val_score = val_score + score.tolist()
             print('val_time: {:.4f}'.format(time.time() - t), 'val_score.length: ', len(val_score))
-        f = open(preserve_dir + '/val_score_{}.pkl'.format(n_d + 1), 'wb')
+        f = open(preserve_dir + '/val_score_{}.pkl'.format(epoch_idx), 'wb')
         pickle.dump(val_score, f)
         f.close()
 
         #f1 = open(preserve_dir + '/val_index.pkl', 'rb')
-        #f2 = open(preserve_dir + '/val_score_{}.pkl'.format(n_d + 1), 'rb')
+        #f2 = open(preserve_dir + '/val_score_{}.pkl'.format(epoch_idx), 'rb')
         #f3 = open(preserve_dir + '/val_label.pkl', 'rb')
 
         #val_index = pickle.load(f1)
         #val_score = pickle.load(f2)
         #val_label = pickle.load(f3)
 
-        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(n_d + 1), 'w')
-        print ('process predict_file_{} start'.format(n_d + 1))
+        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(epoch_idx), 'w')
+        print ('process predict_file_{} start'.format(epoch_idx))
 
         cnt = 0
         # Use enumerate for the same O(1) index reason as truth.txt above.
@@ -429,18 +450,18 @@ if __name__ == '__main__':
 
         predict_file.flush()
         predict_file.close()
-        print ('process predict_file_{} finished'.format(n_d + 1))
+        print ('process predict_file_{} finished'.format(epoch_idx))
         
-        print ('calculate {}_th auc/mrr/ndcg start'.format(n_d + 1))
-        output_filename = preserve_dir + '/scores_{}.txt'.format(n_d + 1)
+        print ('calculate {}_th auc/mrr/ndcg start'.format(epoch_idx))
+        output_filename = preserve_dir + '/scores_{}.txt'.format(epoch_idx)
         output_file = open(output_filename, 'w')
 
         truth_file = open(preserve_dir + '/truth.txt', 'r')
-        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(n_d + 1), 'r')
+        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(epoch_idx), 'r')
 
         auc, mrr, ndcg, ndcg10 = scoring(truth_file, predict_file)
 
         output_file.write("AUC:{:.4f}\nMRR:{:.4f}\nnDCG@5:{:.4f}\nnDCG@10:{:.4f}".format(auc, mrr, ndcg, ndcg10))
         output_file.close()
-        print ('calculate {}_th auc/mrr/ndcg finished'.format(n_d + 1))
+        print ('calculate {}_th auc/mrr/ndcg finished'.format(epoch_idx))
         
