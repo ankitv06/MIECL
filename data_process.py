@@ -117,7 +117,7 @@ class DataProcess():
     def generate_entity_matrix(self):
         print ('generate entity matrix start')
         entity_embed = {}
-        f1 = open('MINDlarge_train/entity_embedding.vec', 'r')
+        f1 = open(self.file1.replace('news.tsv', 'entity_embedding.vec'), 'r')
         lines1 = f1.readlines()
         for line in lines1:
             line = line.strip().split('\t')
@@ -125,7 +125,7 @@ class DataProcess():
                 self.entity_dict[line[0]] = len(self.entity_dict)
             if self.entity_dict[line[0]] not in entity_embed:
                 entity_embed[self.entity_dict[line[0]]] = np.array([float(i) for i in line[1:]])
-        f2 = open('MINDlarge_dev/entity_embedding.vec', 'r')
+        f2 = open(self.file2.replace('news.tsv', 'entity_embedding.vec'), 'r')
         lines2 = f2.readlines()
         for line in lines2:
             line = line.strip().split('\t')
