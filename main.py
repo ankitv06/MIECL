@@ -68,10 +68,8 @@ if __name__ == '__main__':
     # --- Misc ---
     parser.add_argument('--val_only', action='store_true',
                         help='Skip training and go straight to validation')
-    parser.add_argument('--val_batch_multiplier', type=int, default=2,
-                        help='Val batch size = batch_size * val_batch_multiplier. '
-                             'Lower this (e.g. 1 or 2) if validation OOMs. '
-                             'Default 2 is safe for combined branch on 15-20GB GPUs.')
+    parser.add_argument('--eval_batch_size', type=int, default=32,
+                        help='Batch size to use during evaluation to prevent OOM (default 32).')
     args = parser.parse_args()
 
     num_epoch        = args.num_epoch
@@ -101,7 +99,7 @@ if __name__ == '__main__':
     glove_path       = args.glove_path
     preserve_dir     = args.preserve_dir
     val_only         = args.val_only
-    val_batch_multiplier = args.val_batch_multiplier
+    eval_batch_size  = args.eval_batch_size
 
     if not os.path.exists(preserve_dir):
         os.makedirs(preserve_dir)
@@ -313,33 +311,18 @@ if __name__ == '__main__':
     f.close()    
 
     truth_file = open(preserve_dir + '/truth.txt', 'w')
-    # number of val users
-    print(len(val_index))
-    for i in val_index:
-        # val index contains number of candidate articles
-        # val labels contains the labels adn convert to list
-        # if index =3, select the first 3 labels
+    for idx, i in enumerate(val_index):
         i_label = val_label[i[0]: i[1]].data.numpy().tolist()
-        # this is just indexing - 0,1,2..
-        truth_file.write(str(val_index.index(i)) + ' ' + '[')
+        truth_file.write(str(idx) + ' ' + '[')
         for item in i_label[:-1]:
-            # write down the labels
             truth_file.write(str(item) + ',')
-        # close the bracket
         truth_file.write(str(i_label[-1]) + ']' + '\n')
     truth_file.flush()
     truth_file.close()
 
     
     val_dataset = Data.TensorDataset(val_candidate, val_user, val_label)
-    #val_loader = Data.DataLoader(dataset=val_dataset, batch_size=batch_size * 3, shuffle=False, num_workers=2)
-
-    subset_indices = range(32760)  # Choose the indices of the entries you want to include
-    subset_dataset = Subset(val_dataset, subset_indices)
-
-    # Create a new DataLoader with the subset dataset
-    subset_loader = Data.DataLoader(dataset=subset_dataset, batch_size=batch_size * val_batch_multiplier, shuffle=False, num_workers=2)
-    val_loader = subset_loader
+    val_loader = Data.DataLoader(dataset=val_dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=2)
 
     #val_candidate = np.array_split(val_candidate, 8000)     # [7600, 1800] , [11400, 1200], [22800, 600], [15200, 900]
     #val_user = np.array_split(val_user, 8000)       # [9120, 1500] , [34200, 400], [30400, 450]
@@ -415,18 +398,14 @@ if __name__ == '__main__':
         #print('val score: ', val_score)
     # )e one pair of indices - a list
         cnt = 0
-        for i in val_index:
-            # extract the list of scores for all the correponding news artciles using the obtained indices
+        for idx, i in enumerate(val_index):
             i_score = [item for item in val_score[i[0]: i[1]]]
-            # sort the scores
             i_score_sort = sorted(i_score, reverse=True)
             
             rank = []
             for item in i_score:
-                # obtain the rank for the articles based on their position in the sorted score list
                 rank.append(i_score_sort.index(item) + 1)
-            predict_file.write(str(val_index.index(i)) + ' ' + '[')
-            print(rank)
+            predict_file.write(str(idx) + ' ' + '[')
             for item in rank[:-1]:
                 predict_file.write(str(item) + ',')
             predict_file.write(str(rank[-1]) + ']' + '\n')
