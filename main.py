@@ -45,8 +45,8 @@ if __name__ == '__main__':
                         help='Root folder containing MINDsmall_train/, MINDsmall_dev/, glove/')
     parser.add_argument('--eval_only', action='store_true',
                         help='Skip training and go straight to validation')
-    parser.add_argument('--eval_epoch', type=int, default=-1,
-                        help='Specific epoch to evaluate (e.g., 200). If -1, evaluates all.')
+    parser.add_argument('--eval_epochs', type=int, nargs='+', default=[],
+                        help='Specific epochs to evaluate (e.g., --eval_epochs 1 20 200). If empty, evaluates all.
     parser.add_argument('--eval_batch_size', type=int, default=32,
                         help='Batch size to use during evaluation to prevent OOM (default 32).')
     args = parser.parse_args()
@@ -221,8 +221,8 @@ if __name__ == '__main__':
     val_loader = Data.DataLoader(dataset=val_dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=2)
 
     epochs_to_eval = range(1, num_dataset * num_epoch + 1)
-    if args.eval_epoch > 0:
-        epochs_to_eval = [args.eval_epoch]
+    if args.eval_epochs:
+        epochs_to_eval = args.eval_epochs
 
     for epoch_idx in epochs_to_eval:
         #model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode)
