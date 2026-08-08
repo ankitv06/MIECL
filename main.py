@@ -228,7 +228,7 @@ if __name__ == '__main__':
 
     for epoch_idx in epochs_to_eval:
         #model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode)
-        #loaded_dict = torch.load(preserve_dir + '/model_{}.pkl'.format(n_d + 1))
+        #loaded_dict = torch.load(preserve_dir + '/model_{}.pkl'.format(epoch_idx))
         #model = nn.DataParallel(model, device_ids = [0])
         #model.state_dict = loaded_dict
         #print (next(model.parameters()).device)
@@ -280,12 +280,12 @@ if __name__ == '__main__':
                 score = torch.sigmoid(predictor_logits).cpu().data.numpy()
                 val_score = val_score + score.tolist()
             print('val_time: {:.4f}'.format(time.time() - t), 'val_score.length: ', len(val_score))
-        f = open(preserve_dir + '/val_score_{}.pkl'.format(n_d + 1), 'wb')
+        f = open(preserve_dir + '/val_score_{}.pkl'.format(epoch_idx), 'wb')
         pickle.dump(val_score, f)
         f.close()
 
         #f1 = open(preserve_dir + '/val_index.pkl', 'rb')
-        #f2 = open(preserve_dir + '/val_score_{}.pkl'.format(n_d + 1), 'rb')
+        #f2 = open(preserve_dir + '/val_score_{}.pkl'.format(epoch_idx), 'rb')
         #f3 = open(preserve_dir + '/val_label.pkl', 'rb')
 
         #val_index = pickle.load(f1)
