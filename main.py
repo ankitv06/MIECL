@@ -98,9 +98,11 @@ if __name__ == '__main__':
     user_his = torch.LongTensor(np.array(list(user_his.values()), dtype = 'int32'))
     print ('num_user: ', len(user_his))
     
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode)
-    device_ids = [0,1,2,3,4,5,6,7]
-    model = nn.DataParallel(model, device_ids = device_ids)
+    model = model.to(device)
+    if torch.cuda.is_available():
+        model = nn.DataParallel(model)
  
     #user_adj = []
     #f = open('small_user_nei_sort.txt', 'r', encoding='utf-8')
