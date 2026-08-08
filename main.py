@@ -326,19 +326,15 @@ if __name__ == '__main__':
     f.close()    
 
     truth_file = open(preserve_dir + '/truth.txt', 'w')
-    # number of val users
     print(len(val_index))
-    for i in val_index:
-        # val index contains number of candidate articles
-        # val labels contains the labels adn convert to list
-        # if index =3, select the first 3 labels
+    # Use enumerate so we get the impression index (0, 1, 2...) directly.
+    # The original val_index.index(i) searched the full list on every iteration
+    # — O(n²) for 70k impressions. enumerate is O(1) per step.
+    for idx, i in enumerate(val_index):
         i_label = val_label[i[0]: i[1]].data.numpy().tolist()
-        # this is just indexing - 0,1,2..
-        truth_file.write(str(val_index.index(i)) + ' ' + '[')
+        truth_file.write(str(idx) + ' ' + '[')
         for item in i_label[:-1]:
-            # write down the labels
             truth_file.write(str(item) + ',')
-        # close the bracket
         truth_file.write(str(i_label[-1]) + ']' + '\n')
     truth_file.flush()
     truth_file.close()
@@ -417,22 +413,16 @@ if __name__ == '__main__':
         predict_file = open(preserve_dir + '/prediction_{}.txt'.format(n_d + 1), 'w')
         print ('process predict_file_{} start'.format(n_d + 1))
 
-        # every term in val index represents the number of candidate articles associated with every user
-        #print('val score: ', val_score)
-    # )e one pair of indices - a list
         cnt = 0
-        for i in val_index:
-            # extract the list of scores for all the correponding news artciles using the obtained indices
+        # Use enumerate for the same O(1) index reason as truth.txt above.
+        for idx, i in enumerate(val_index):
             i_score = [item for item in val_score[i[0]: i[1]]]
-            # sort the scores
             i_score_sort = sorted(i_score, reverse=True)
-            
+
             rank = []
             for item in i_score:
-                # obtain the rank for the articles based on their position in the sorted score list
                 rank.append(i_score_sort.index(item) + 1)
-            predict_file.write(str(val_index.index(i)) + ' ' + '[')
-            print(rank)
+            predict_file.write(str(idx) + ' ' + '[')
             for item in rank[:-1]:
                 predict_file.write(str(item) + ',')
             predict_file.write(str(rank[-1]) + ']' + '\n')
