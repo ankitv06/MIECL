@@ -46,7 +46,7 @@ if __name__ == '__main__':
     parser.add_argument('--eval_only', action='store_true',
                         help='Skip training and go straight to validation')
     parser.add_argument('--eval_epochs', type=int, nargs='+', default=[],
-                        help='Specific epochs to evaluate (e.g., --eval_epochs 1 20 200). If empty, evaluates all.
+                        help='Specific epochs to evaluate (e.g., --eval_epochs 1 20 200). If empty, evaluates all.')
     parser.add_argument('--eval_batch_size', type=int, default=32,
                         help='Batch size to use during evaluation to prevent OOM (default 32).')
     args = parser.parse_args()
