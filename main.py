@@ -70,6 +70,8 @@ if __name__ == '__main__':
                         help='Skip training and go straight to validation')
     parser.add_argument('--eval_batch_size', type=int, default=32,
                         help='Batch size to use during evaluation to prevent OOM (default 32).')
+    parser.add_argument('--eval_epochs', type=int, nargs='+', default=[],
+                        help='Specific epochs to evaluate (e.g., --eval_epochs 1 20 200). If empty, evaluates all.')
     args = parser.parse_args()
 
     num_epoch        = args.num_epoch
@@ -328,14 +330,23 @@ if __name__ == '__main__':
     #val_user = np.array_split(val_user, 8000)       # [9120, 1500] , [34200, 400], [30400, 450]
     # [90, 26600] [400, 6600]
 
-    for n_d in range(num_dataset * num_epoch):
+    epochs_to_eval = range(1, num_dataset * num_epoch + 1)
+    if args.eval_epochs:
+        epochs_to_eval = args.eval_epochs
+
+    for epoch_idx in epochs_to_eval:
         #model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode)
-        #loaded_dict = torch.load(preserve_dir + '/model_{}.pkl'.format(n_d + 1))
+        #loaded_dict = torch.load(preserve_dir + '/model_{}.pkl'.format(epoch_idx))
         #model = nn.DataParallel(model, device_ids = [0])
         #model.state_dict = loaded_dict
         #print (next(model.parameters()).device)
-
-        model.load_state_dict(torch.load(preserve_dir + '/model_{}.pkl'.format(n_d + 1)))
+        
+        checkpoint_path = preserve_dir + '/model_{}.pkl'.format(epoch_idx)
+        if not os.path.exists(checkpoint_path):
+            print("Checkpoint not found:", checkpoint_path)
+            continue
+            
+        model.load_state_dict(torch.load(checkpoint_path))
         model = model
         model.eval()
         val_score = []
@@ -379,12 +390,12 @@ if __name__ == '__main__':
                 score = torch.sigmoid(predictor_logits).cpu().data.numpy()
                 val_score = val_score + score.tolist()
             print('val_time: {:.4f}'.format(time.time() - t), 'val_score.length: ', len(val_score))
-        f = open(preserve_dir + '/val_score_{}.pkl'.format(n_d + 1), 'wb')
+        f = open(preserve_dir + '/val_score_{}.pkl'.format(epoch_idx), 'wb')
         pickle.dump(val_score, f)
         f.close()
 
         #f1 = open(preserve_dir + '/val_index.pkl', 'rb')
-        #f2 = open(preserve_dir + '/val_score_{}.pkl'.format(n_d + 1), 'rb')
+        #f2 = open(preserve_dir + '/val_score_{}.pkl'.format(epoch_idx), 'rb')
         #f3 = open(preserve_dir + '/val_label.pkl', 'rb')
 
         #val_index = pickle.load(f1)
@@ -412,18 +423,18 @@ if __name__ == '__main__':
 
         predict_file.flush()
         predict_file.close()
-        print ('process predict_file_{} finished'.format(n_d + 1))
+        print ('process predict_file_{} finished'.format(epoch_idx))
         
-        print ('calculate {}_th auc/mrr/ndcg start'.format(n_d + 1))
-        output_filename = preserve_dir + '/scores_{}.txt'.format(n_d + 1)
+        print ('calculate {}_th auc/mrr/ndcg start'.format(epoch_idx))
+        output_filename = preserve_dir + '/scores_{}.txt'.format(epoch_idx)
         output_file = open(output_filename, 'w')
 
         truth_file = open(preserve_dir + '/truth.txt', 'r')
-        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(n_d + 1), 'r')
+        predict_file = open(preserve_dir + '/prediction_{}.txt'.format(epoch_idx), 'r')
 
         auc, mrr, ndcg, ndcg10 = scoring(truth_file, predict_file)
 
         output_file.write("AUC:{:.4f}\nMRR:{:.4f}\nnDCG@5:{:.4f}\nnDCG@10:{:.4f}".format(auc, mrr, ndcg, ndcg10))
         output_file.close()
-        print ('calculate {}_th auc/mrr/ndcg finished'.format(n_d + 1))
+        print ('calculate {}_th auc/mrr/ndcg finished'.format(epoch_idx))
         
