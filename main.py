@@ -151,38 +151,38 @@ if __name__ == '__main__':
                     candidate_title, his_title, train_label = Variable(candidate_title),Variable(his_title), Variable(train_label)
                     candidate_abstract, his_abstract  = news_abstract[train_candidate].to(device), news_abstract[user_his[train_user]].to(device)
                     candidate_abstract, his_abstract  = Variable(candidate_abstract),Variable(his_abstract)
-                print (candidate_title.size(), candidate_abstract.size())
-
-                #neighbor_user = user_adj[train_user]
-                #(neighbor_1, neighbor_2) = torch.split(neighbor_user, 1, dim = 1)
-                #neighbor_1, neighbor_2 = neighbor_1.squeeze(dim = 1), neighbor_2.squeeze(dim = 1)
-                
-                #nei1_title, nei1_abstract  = news_title[user_his[neighbor_1]].cuda(), news_abstract[user_his[neighbor_1]].cuda()
-                #nei1_title, nei1_abstract = Variable(nei1_title), Variable(nei1_abstract)
-                #nei2_title, nei2_abstract  = news_title[user_his[neighbor_2]].cuda(), news_abstract[user_his[neighbor_2]].cuda()
-                #nei2_title, nei2_abstract = Variable(nei2_title), Variable(nei2_abstract)
-
-                model.train()
-                optimizer.zero_grad()
-
-                #predictor_logits, user_infoNCE_logits = model(candidate_title, candidate_abstract, his_title, his_abstract, neighbor_title, neighbor_abstract)
-                predictor_logits, user_infoNCE_logits = model(candidate_title, candidate_abstract, his_title, his_abstract)
-                predictor_loss = criterion(predictor_logits, train_label)
-                
-                if contrastive_mode == 'USER':
-                    user_infoNCE_labels = torch.zeros(len(user_infoNCE_logits), dtype=torch.long, device=device)
-                    user_infoNCE_loss = F.cross_entropy(user_infoNCE_logits, user_infoNCE_labels)
-                    print ('predictor_loss: ', predictor_loss.data.item(), 'user_infoNCE_loss: ', user_infoNCE_loss.data.item())
-                    loss = predictor_loss + alpha * user_infoNCE_loss
-                else:
-                    print ('predictor_loss: ', predictor_loss.data.item())
-                    loss = predictor_loss
+                    print (candidate_title.size(), candidate_abstract.size())
+    
+                    #neighbor_user = user_adj[train_user]
+                    #(neighbor_1, neighbor_2) = torch.split(neighbor_user, 1, dim = 1)
+                    #neighbor_1, neighbor_2 = neighbor_1.squeeze(dim = 1), neighbor_2.squeeze(dim = 1)
                     
-                loss.backward()
-                optimizer.step()
-
-                loss_per_epoch.append(loss.data.item())
-                print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'step: {:04d}'.format(step + 1), 'loss: {:.4f}'.format(np.mean(loss_per_epoch)), 'time: {:.4f}'.format(time.time() - t1))
+                    #nei1_title, nei1_abstract  = news_title[user_his[neighbor_1]].cuda(), news_abstract[user_his[neighbor_1]].cuda()
+                    #nei1_title, nei1_abstract = Variable(nei1_title), Variable(nei1_abstract)
+                    #nei2_title, nei2_abstract  = news_title[user_his[neighbor_2]].cuda(), news_abstract[user_his[neighbor_2]].cuda()
+                    #nei2_title, nei2_abstract = Variable(nei2_title), Variable(nei2_abstract)
+    
+                    model.train()
+                    optimizer.zero_grad()
+    
+                    #predictor_logits, user_infoNCE_logits = model(candidate_title, candidate_abstract, his_title, his_abstract, neighbor_title, neighbor_abstract)
+                    predictor_logits, user_infoNCE_logits = model(candidate_title, candidate_abstract, his_title, his_abstract)
+                    predictor_loss = criterion(predictor_logits, train_label)
+                    
+                    if contrastive_mode == 'USER':
+                        user_infoNCE_labels = torch.zeros(len(user_infoNCE_logits), dtype=torch.long, device=device)
+                        user_infoNCE_loss = F.cross_entropy(user_infoNCE_logits, user_infoNCE_labels)
+                        print ('predictor_loss: ', predictor_loss.data.item(), 'user_infoNCE_loss: ', user_infoNCE_loss.data.item())
+                        loss = predictor_loss + alpha * user_infoNCE_loss
+                    else:
+                        print ('predictor_loss: ', predictor_loss.data.item())
+                        loss = predictor_loss
+                        
+                    loss.backward()
+                    optimizer.step()
+    
+                    loss_per_epoch.append(loss.data.item())
+                    print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'step: {:04d}'.format(step + 1), 'loss: {:.4f}'.format(np.mean(loss_per_epoch)), 'time: {:.4f}'.format(time.time() - t1))
 
             torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(n_d * num_epoch + n_ep + 1))
             print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'time: {:.4f}'.format(time.time() - t0))
@@ -258,6 +258,7 @@ if __name__ == '__main__':
                 candidate_abstract, his_abstract = news_abstract[val_candidate].unsqueeze(dim = 1).to(device), news_abstract[user_his[val_user]].to(device)
                 candidate_abstract, his_abstract = Variable(candidate_abstract), Variable(his_abstract)
 
+                print (candidate_title.size(), his_title.size(), candidate_abstract.size(), his_abstract.size())
                 #neighbor_user = user_adj[val_user]
                 #neighbor_1, neighbor_2 = torch.split(neighbor_user, 1, dim = 1)
                 #neighbor_1, neighbor_2 = neighbor_1.squeeze(dim = 1), neighbor_2.squeeze(dim = 1)
