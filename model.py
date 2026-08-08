@@ -281,28 +281,68 @@ class InfoNCE(nn.Module):
 		self.W = nn.Parameter(torch.Tensor(hid_dim, hid_dim))
 		nn.init.xavier_uniform_(self.W, gain = 1.414)
 
-	def forward(self, multi_rep):
+	def forward(self, multi_rep, news_pair=None):
 		if self.mode == 'prototype_self':
 		# 正负样本1:1，正样本为对应兴趣原型向量，负样本为随机抽取某兴趣条件下新闻语义表示
 		# anchor: n_i_k, positive: p_k, negative: n_i_k'
 			# to optimizie target user multi rep
-			positive_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1, ))
-			negative_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1, ))
+			positive_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1, )).to(multi_rep.device)
+			negative_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1, )).to(multi_rep.device)
 			while (positive_index == negative_index):
-				negative_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1,))
+				negative_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1,)).to(multi_rep.device)
 
 			# multi rep - target user rep 
-			anchor = torch.index_select(multi_rep, dim = 1, index = positive_index)    # [30, 1, 400]
+			anchor = torch.index_select(multi_rep, dim = 1, index = positive_index)    # [batch, 1, 400]
 			# uk, Ik -> positive pair
 			positive = torch.index_select(self.prototype, dim = 0, index = positive_index)	  # [1, 400]
 			# uk uj -> negative pair
-			negative = torch.index_select(multi_rep, dim = 1, index = negative_index)	# [30, 1, 400]
+			negative = torch.index_select(multi_rep, dim = 1, index = negative_index)	# [batch, 1, 400]
 
-			# y = uT.nc - user rep (anchor) x canddiate rep (+)
-			positive_logit = torch.matmul(anchor.squeeze(dim = 1), positive.transpose(-1, -2))	   # [30, 1]
-			# y = uT.nc - user rep (anchor) x canddiate rep (+)
-			negative_logit = torch.matmul(anchor, negative.transpose(-1, -2)).squeeze(dim = 2)	   # [30, 1]
-			logits = torch.cat([positive_logit, negative_logit], dim = -1)
+			# FIX 1: L2-normalize all three vectors so dot-products = cosine similarity,
+			# bounded strictly to [-1, +1] regardless of embedding magnitude.
+			# Without this, raw dot products of 400-dim trained embeddings can reach
+			# tens of thousands, causing cross_entropy gradients to explode.
+			anchor   = F.normalize(anchor,   p=2, dim=-1)  # [batch, 1, 400] -> unit norm
+			positive = F.normalize(positive, p=2, dim=-1)  # [1,     400]    -> unit norm
+			negative = F.normalize(negative, p=2, dim=-1)  # [batch, 1, 400] -> unit norm
+
+			# FIX 2: Temperature τ=0.1 sharpens the distribution (standard in SimCLR/MoCo).
+			# Dividing by τ scales bounded logits from [-1,1] to [-10,+10] — sharp enough
+			# to learn a meaningful contrastive signal, but still safely bounded.
+			TAU = 0.1
+			positive_logit = torch.matmul(anchor.squeeze(dim = 1), positive.transpose(-1, -2)) / TAU	   # [batch, 1]
+			negative_logit = torch.matmul(anchor, negative.transpose(-1, -2)).squeeze(dim = 2) / TAU	   # [batch, 1]
+			logits = torch.cat([positive_logit, negative_logit], dim = -1)  # [batch, 2]
+
+		# --- Popularity Debiased Augmentation: news-level contrastive learning ---
+		# Anchor:   popular article rep          (news_pair[0])  [batch, 400]
+		# Positive: non-popular, same-topic rep  (news_pair[1])  [batch, 400]
+		# Negative: different-topic article rep  (news_pair[2])  [batch, 400]
+		# Goal: push popular and non-popular same-topic reps together,
+		#       push popular rep away from different-topic reps.
+		# Returns logits [batch, 2]: col-0 = positive sim, col-1 = negative sim.
+		# Samples where popular_rep is the NULL sentinel (all-zero input) are
+		# handled in main.py by masking before the loss calculation.
+		elif self.mode == 'popularity_debiased':
+			assert news_pair is not None, "popularity_debiased mode requires news_pair=(popular_rep, unpopular_rep, diff_rep)"
+			popular_rep, unpopular_rep, diff_rep = news_pair  # each [batch, 400]
+
+			# FIX 3: L2-normalize news embeddings here too.
+			# News encoder outputs also grow in magnitude during long training runs,
+			# which would make raw dot-products explode identically to Fix 1 above.
+			# After normalization, cosine similarity is in [-1, +1] and we apply
+			# temperature τ=0.2 (slightly softer than user-level, because topic-level
+			# distinctions are inherently less sharp than prototype alignment).
+			TAU = 0.2
+			anchor   = F.normalize(popular_rep,   p=2, dim=-1)  # [batch, 400] -> unit norm
+			positive = F.normalize(unpopular_rep, p=2, dim=-1)  # [batch, 400] -> unit norm
+			negative = F.normalize(diff_rep,      p=2, dim=-1)  # [batch, 400] -> unit norm
+
+			# Cosine-similarity-based logits scaled by temperature
+			pos_logit = (anchor * positive).sum(dim=-1, keepdim=True) / TAU  # [batch, 1]
+			neg_logit = (anchor * negative).sum(dim=-1, keepdim=True) / TAU  # [batch, 1]
+			logits = torch.cat([pos_logit, neg_logit], dim=-1)               # [batch, 2]
+
 		return logits
 	
 # intiliases various components of the model
@@ -357,7 +397,10 @@ class Multi_Rep_Predictor(nn.Module):
 		#nn.init.xavier_uniform_(self.wgcn2.data, gain = 1.414)
 		#nn.init.xavier_uniform_(self.wgcn3.data, gain = 1.414)
 
-	def forward(self, candidate_title, candidate_abstract, his_title, his_abstract):
+	def forward(self, candidate_title, candidate_abstract, his_title, his_abstract,
+				pop_title=None, pop_abstract=None,
+				unpop_title=None, unpop_abstract=None,
+				diff_title=None, diff_abstract=None):
 		batch_size = candidate_title.size(0)
 
 		candidate_rep = self.news_encoder(candidate_title, candidate_abstract)	  # [30, 5, 400]
@@ -403,8 +446,36 @@ class Multi_Rep_Predictor(nn.Module):
 
 		if self.contrastive_mode == 'USER':
 			user_infoNCE_logits = self.infoNCE(target_user_rep)
-			# contrastive loss and predictor loss
-			return predict_logits, user_infoNCE_logits
+
+			# --- Popularity Debiased Augmentation: news-level CL ---
+			# Only runs when the 3 extra article tensors are provided by main.py.
+			# pop_title/abstract are shape [batch, 1, seq_len]; squeeze to [batch, seq_len]
+			# then unsqueeze to [batch, 1, seq_len] for News_Encoder compatibility.
+			news_debiased_logits = None
+			if pop_title is not None:
+				# Encode each of the 3 augmented articles: shape in [batch,1,seq] -> out [batch,1,400]
+				popular_rep  = self.news_encoder(pop_title,   pop_abstract).squeeze(dim=1)   # [batch, 400]
+				unpopular_rep = self.news_encoder(unpop_title, unpop_abstract).squeeze(dim=1) # [batch, 400]
+				diff_rep     = self.news_encoder(diff_title,  diff_abstract).squeeze(dim=1)   # [batch, 400]
+
+				news_pair = (popular_rep, unpopular_rep, diff_rep)
+
+				# Create a separate InfoNCE instance for popularity_debiased mode,
+				# but reuse the same weights structure. We call forward directly with the mode.
+				# Since self.infoNCE.mode may be 'prototype_self', we call the debiased
+				# branch by temporarily swapping the mode flag safely:
+				orig_mode = self.infoNCE.mode
+				self.infoNCE.mode = 'popularity_debiased'
+				news_debiased_logits = self.infoNCE(target_user_rep, news_pair=news_pair)  # [batch, 2]
+				self.infoNCE.mode = orig_mode
+
+				# Mask out sentinel samples (those where pop_id was 0, i.e., no valid pair found).
+				# A sentinel sample has popular_rep == all zeros (NULL article embedding).
+				# Identify them: if the sum of |popular_rep| is 0, it's a sentinel.
+				valid_mask = (popular_rep.abs().sum(dim=-1) > 0).float().unsqueeze(-1)  # [batch, 1]
+				news_debiased_logits = news_debiased_logits * valid_mask  # zero out sentinel rows
+
+			return predict_logits, user_infoNCE_logits, news_debiased_logits
 		else:
-			return predict_logits, None
-		
+			return predict_logits, None, None
+

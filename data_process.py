@@ -6,8 +6,9 @@ import random
 import torch
 import json
 
-#import nltk
-#nltk.download('punkt')
+import nltk
+nltk.download('punkt')
+nltk.download('punkt_tab')
 
 class DataProcess():
     def __init__(self, file1, file2, file3, file4, file5, file6):
@@ -51,6 +52,27 @@ class DataProcess():
         self.test_label = []
         self.test_user_his = []
         self.test_user = []
+
+        # --- Popularity Debiased Augmentation ---
+        # Maps news int_id -> category string and -> subcategory string
+        self.news_category   = {0: 'NULL'}   # {news_int_id: category}
+        self.news_subcategory = {0: 'NULL'}  # {news_int_id: subcategory}
+        # Maps topic string -> list of news int_ids
+        self.subcategory_to_news = {}        # {subcategory: [news_int_ids]}
+        self.category_to_news    = {}        # {category:    [news_int_ids]}
+        # Click count per article (populated in compute_popularity)
+        self.news_click_count = {}           # {news_int_id: click_count}
+        # Sets of popular / non-popular article int_ids
+        self.popular_set    = set()
+        self.nonpopular_set = set()
+        # Per-topic pools after popularity classification
+        # Each maps topic_key -> list of news_int_ids
+        self.popular_pool    = {}            # {topic_key: [popular ids in that topic]}
+        self.nonpopular_pool = {}            # {topic_key: [non-popular ids in that topic]}
+        # Augmentation triplets (parallel to train_candidate)
+        self.train_pop   = []               # popular article id per training sample
+        self.train_unpop = []               # non-popular article id per training sample
+        self.train_diff  = []               # different-topic article id per training sample
     
     # random sample of a specified size is obtained from the array
     # if npratio is lesser than len(array), samples directly from array
@@ -64,7 +86,8 @@ class DataProcess():
 
     # 处理新闻数据
 
-    # read and process news from a file containing news data
+    # read and process news from a file containing news data: generates embeddings for title, abstract and entity
+    # Also parses category (line[1]) and subcategory (line[2]) for popularity debiasing
     def process_news(self, file):
         f = open(file, 'r', encoding='utf-8')
         lines = f.readlines()
@@ -75,6 +98,23 @@ class DataProcess():
             if line[0] not in self.news_id:
                 # assigns a new id for the news article incase it does not exist already
                 self.news_id[line[0]] = len(self.news_id)
+
+            nid = self.news_id[line[0]]
+
+            # --- Parse category and subcategory (popularity debiasing) ---
+            category    = line[1] if len(line) > 1 else 'unknown'
+            subcategory = line[2] if len(line) > 2 else 'unknown'
+            self.news_category[nid]    = category
+            self.news_subcategory[nid] = subcategory
+            # Build reverse maps: topic -> list of article ids
+            if subcategory not in self.subcategory_to_news:
+                self.subcategory_to_news[subcategory] = []
+            if nid not in self.subcategory_to_news[subcategory]:
+                self.subcategory_to_news[subcategory].append(nid)
+            if category not in self.category_to_news:
+                self.category_to_news[category] = []
+            if nid not in self.category_to_news[category]:
+                self.category_to_news[category].append(nid)
             
             # iterate through the words of the title
             # assign unique ids to every word
@@ -113,11 +153,98 @@ class DataProcess():
             if self.news_id[line[0]] not in self.news_entity_dict:
                 self.news_entity_dict[self.news_id[line[0]]] = entity + [0] * (5 - len(entity))
             
+    # --- Popularity Debiased Augmentation: compute article popularity from training behaviors ---
+    # Reads training behaviors.tsv, counts how many times each article was clicked,
+    # then classifies articles into popular (top 15%) and non-popular (bottom 75%) pools.
+    # Builds per-topic (subcategory-first, category fallback) pools for pair sampling.
+    # MIN_TOPIC_SIZE controls the fallback threshold: subcategories with fewer articles
+    # than this value use their parent category instead.
+    def compute_popularity(self):
+        print('compute popularity start')
+        MIN_TOPIC_SIZE = 20    # subcategory fallback threshold
+        POPULAR_PCTILE  = 85   # top 15%  -> popular   (100 - 15 = 85th percentile cutoff)
+        UNPOPULAR_PCTILE = 75  # bottom 75% -> non-popular
+
+        # --- Step 1: Count clicks per article across all training impressions ---
+        f = open(self.file3, 'r', encoding='utf-8')
+        lines = f.readlines()
+        for line in lines:
+            line = line.strip().split('\t')
+            if len(line) < 5 or line[4] == '':
+                continue
+            for item in line[4].split():
+                parts = item.split('-')
+                if len(parts) != 2:
+                    continue
+                news_str, label = parts[0], parts[1]
+                if label == '1' and news_str in self.news_id:
+                    nid = self.news_id[news_str]
+                    self.news_click_count[nid] = self.news_click_count.get(nid, 0) + 1
+        f.close()
+
+        # Articles that were never clicked get a count of 0
+        all_nids = list(self.news_id.values())
+        for nid in all_nids:
+            if nid not in self.news_click_count:
+                self.news_click_count[nid] = 0
+
+        # --- Step 2: Determine popularity thresholds ---
+        counts = list(self.news_click_count.values())
+        nonzero_counts = [cnt for cnt in counts if cnt > 0]
+        
+        if nonzero_counts:
+            pop_threshold   = float(np.percentile(nonzero_counts, POPULAR_PCTILE))   # >= this -> popular
+            unpop_threshold = float(np.percentile(nonzero_counts, UNPOPULAR_PCTILE)) # <= this -> non-popular
+        else:
+            pop_threshold, unpop_threshold = 1.0, 0.0
+            
+        print(f'  popular threshold (>= {POPULAR_PCTILE}th pctile of non-zero): {pop_threshold} clicks')
+        print(f'  non-popular threshold (<= {UNPOPULAR_PCTILE}th pctile of non-zero): {unpop_threshold} clicks')
+
+        for nid, cnt in self.news_click_count.items():
+            if cnt >= pop_threshold:
+                self.popular_set.add(nid)
+            if cnt <= unpop_threshold:
+                self.nonpopular_set.add(nid)
+        print(f'  popular articles: {len(self.popular_set)}, non-popular articles: {len(self.nonpopular_set)}')
+
+        # --- Step 3: Build per-topic pools with subcategory-first, category fallback ---
+        # Determine which topic key to use for each article
+        def get_topic_key(nid):
+            sub = self.news_subcategory.get(nid, 'unknown')
+            if len(self.subcategory_to_news.get(sub, [])) >= MIN_TOPIC_SIZE:
+                return sub
+            return self.news_category.get(nid, 'unknown')
+
+        # Group all articles by their resolved topic key
+        topic_to_all = {}   # topic_key -> [all nids in that topic]
+        for nid in all_nids:
+            key = get_topic_key(nid)
+            topic_to_all.setdefault(key, []).append(nid)
+
+        # Store the topic key resolver for use during training sample generation
+        self._get_topic_key = get_topic_key
+        self._topic_to_all  = topic_to_all
+        self._all_topic_keys = list(topic_to_all.keys())
+
+        # Split each topic into popular / non-popular sub-pools
+        for key, nids in topic_to_all.items():
+            pop_in_topic    = [n for n in nids if n in self.popular_set]
+            unpop_in_topic  = [n for n in nids if n in self.nonpopular_set]
+            if pop_in_topic:
+                self.popular_pool[key]    = pop_in_topic
+            if unpop_in_topic:
+                self.nonpopular_pool[key] = unpop_in_topic
+
+        skippable = sum(1 for k in topic_to_all if k not in self.popular_pool or k not in self.nonpopular_pool)
+        print(f'  topics with valid pop+unpop pools: {len(topic_to_all) - skippable}/{len(topic_to_all)}')
+        print('compute popularity finished')
+
     # read the entity embeddings and generate a matrix
     def generate_entity_matrix(self):
         print ('generate entity matrix start')
         entity_embed = {}
-        f1 = open('MINDlarge_train/entity_embedding.vec', 'r')
+        f1 = open('/content/drive/MyDrive/News Recc Code/dataset/MINDsmall_train/entity_embedding.vec', 'r')
         lines1 = f1.readlines()
         for line in lines1:
             line = line.strip().split('\t')
@@ -125,7 +252,7 @@ class DataProcess():
                 self.entity_dict[line[0]] = len(self.entity_dict)
             if self.entity_dict[line[0]] not in entity_embed:
                 entity_embed[self.entity_dict[line[0]]] = np.array([float(i) for i in line[1:]])
-        f2 = open('MINDlarge_dev/entity_embedding.vec', 'r')
+        f2 = open('/content/drive/MyDrive/News Recc Code/dataset/MINDsmall_dev/entity_embedding.vec', 'r')
         lines2 = f2.readlines()
         for line in lines2:
             line = line.strip().split('\t')
@@ -184,11 +311,9 @@ class DataProcess():
             if line[1] not in self.userid_dict:
                 self.userid_dict[line[1]] = len(self.userid_dict)
 
-            # add user id
-            # complete and padded historys
-            if self.userid_dict[line[1]] not in self.user_his_pad:
-                self.user_his_pad[self.userid_dict[line[1]]] = click_his_pad
-                self.user_his_complete[self.userid_dict[line[1]]] = click_his_complete
+            # always overwrite with the latest session so we capture the most complete history
+            self.user_his_pad[self.userid_dict[line[1]]] = click_his_pad
+            self.user_his_complete[self.userid_dict[line[1]]] = click_his_complete
         f3.close()
 
         f4 = open(self.file4)
@@ -205,9 +330,9 @@ class DataProcess():
             if line[1] not in self.userid_dict:
                 self.userid_dict[line[1]] = len(self.userid_dict)
 
-            if self.userid_dict[line[1]] not in self.user_his_pad:
-                self.user_his_pad[self.userid_dict[line[1]]] = click_his_pad
-                self.user_his_complete[self.userid_dict[line[1]]] = click_his_complete
+            # always overwrite with the latest session so we capture the most complete history
+            self.user_his_pad[self.userid_dict[line[1]]] = click_his_pad
+            self.user_his_complete[self.userid_dict[line[1]]] = click_his_complete
         f4.close()
         return self.user_his_pad
 
@@ -221,8 +346,16 @@ class DataProcess():
         self.train_label = []
         self.train_user_his = []
         self.train_user = []
+        self.train_pop   = []
+        self.train_unpop = []
+        self.train_diff  = []
         
         print ('process train behaviors start')
+
+        # Check whether compute_popularity() has been called; warn if not.
+        _has_pop_pools = bool(self.popular_pool) and bool(self.nonpopular_pool)
+        if not _has_pop_pools:
+            print('  [WARNING] compute_popularity() not called. Augmentation triplets will all be sentinel (0).')
 
         # splits and processes every line
         f3 = open(self.file3)
@@ -266,15 +399,45 @@ class DataProcess():
                 self.train_candidate.append(candidate_shuffle)
                 self.train_label.append(candidate_label_shuffle)
                 self.train_user.append(self.userid_dict[line[1]])
+
+                # --- Popularity Debiased Augmentation: generate triplet for this sample ---
+                # doc is the positive (clicked) article for this training sample.
+                # We find its topic, then sample one popular and one non-popular article
+                # from the same topic, plus one article from a randomly chosen different topic.
+                pop_id, unpop_id, diff_id = 0, 0, 0  # sentinel = 0 (NULL article)
+                if _has_pop_pools:
+                    topic_key = self._get_topic_key(doc)
+                    pop_pool   = self.popular_pool.get(topic_key, [])
+                    unpop_pool = self.nonpopular_pool.get(topic_key, [])
+                    if pop_pool and unpop_pool:
+                        pop_id   = random.choice(pop_pool)
+                        unpop_id = random.choice(unpop_pool)
+                        # Sample a different topic randomly (ensure it differs from topic_key)
+                        diff_candidates = [k for k in self._all_topic_keys if k != topic_key]
+                        if diff_candidates:
+                            diff_topic_key = random.choice(diff_candidates)
+                            diff_id = random.choice(self._topic_to_all[diff_topic_key])
+
+                self.train_pop.append(pop_id)
+                self.train_unpop.append(unpop_id)
+                self.train_diff.append(diff_id)
+
         self.train_candidate = torch.LongTensor(np.array(self.train_candidate, dtype='int32'))
-        self.train_label = torch.FloatTensor(np.array(self.train_label, dtype='int32'))
-        self.train_user = torch.LongTensor(np.array(self.train_user, dtype = 'int32'))
+        self.train_label     = torch.FloatTensor(np.array(self.train_label,     dtype='int32'))
+        self.train_user      = torch.LongTensor(np.array(self.train_user,       dtype='int32'))
+        self.train_pop       = torch.LongTensor(np.array(self.train_pop,        dtype='int32'))
+        self.train_unpop     = torch.LongTensor(np.array(self.train_unpop,      dtype='int32'))
+        self.train_diff      = torch.LongTensor(np.array(self.train_diff,       dtype='int32'))
 
         print ('train_candidate.size: ', self.train_candidate.size())
-        print ('train_label.size:', self.train_label.size())
-        print ('train_user.size:', self.train_user.size())
+        print ('train_label.size:',      self.train_label.size())
+        print ('train_user.size:',       self.train_user.size())
+        print ('train_pop.size:',        self.train_pop.size())
+        print ('train_unpop.size:',      self.train_unpop.size())
+        print ('train_diff.size:',       self.train_diff.size())
         print ('process train behaviors finished')
-        return [self.train_candidate, self.train_user, self.train_label]
+        return [self.train_candidate, self.train_user, self.train_label,
+                self.train_pop, self.train_unpop, self.train_diff]
 
 
     # 处理验证集数据
@@ -325,12 +488,11 @@ class DataProcess():
         self.val_label = torch.FloatTensor(np.array(self.val_label, dtype='int32'))
         self.val_user = torch.LongTensor(np.array(self.val_user, dtype = 'int32'))
 
-        print('val_candidate.shape: ', self.val_candidate.shape) # candidate articl ids
+        print('val_candidate.shape: ', self.val_candidate.shape) # candidate article ids
         print('val_label.size: ', self.val_label.size()) # labels
-        print ('val_user.size:', self.val_user.size()) # user ids #2658091
-        print('len(val_index): ', len(self.val_index)) # number of candidate articles for that user #70938
-
-        self.val_index = self.val_index[:900]
+        print ('val_user.size:', self.val_user.size()) # user ids
+        print('len(val_index): ', len(self.val_index)) # total impressions (e.g. 70938 for MINDsmall)
+        
         print('process val behaviors finished')
         return [self.val_candidate, self.val_user, self.val_label, self.val_index]
 
@@ -386,7 +548,10 @@ class DataProcess():
         lines = f.readlines()
         for line in lines:
             if len(line) == 0:
-                break
+                # An empty line is a file artifact; skip it and keep loading.
+                # Using `break` here would silently stop loading all remaining
+                # GloVe vectors — changed to `continue`.
+                continue
             line = line.strip().split()
             if len(line) != 301:
                 continue
