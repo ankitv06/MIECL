@@ -3,3 +3,5 @@ dataset/
 *.pth
 *.ckpt
 *.bin
+__pycache__/
+outputs/

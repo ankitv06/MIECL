@@ -273,37 +273,75 @@ class Multi_Rep_User_Encoder(nn.Module):
 		return multi_user_rep
 
 class InfoNCE(nn.Module):
-	def __init__(self, hid_dim, infonce_mode, prototype):
+	def __init__(self, hid_dim, infonce_mode, prototype, temperature=0.07):
 		super().__init__()
 		self.mode = infonce_mode
 		self.prototype = prototype
+		self.temperature = temperature  # controls sharpness of contrastive distribution
 
 		self.W = nn.Parameter(torch.Tensor(hid_dim, hid_dim))
 		nn.init.xavier_uniform_(self.W, gain = 1.414)
 
-	def forward(self, multi_rep):
-		if self.mode == 'prototype_self':
+	# --- Shared helper: echo_chamber_debiased logits with L2 norm + temperature ---
+	# anchor  : u_k        [B, K, D]  (real user representations)
+	# positive: I_k        [K, D]     (global interest prototypes)
+	# negative: u_echo_k   [B, K, D]  (echo-chamber user representations)
+	# dominant_indices: [B]  — dominant prototype index per user (excluded as anchor)
+	# Returns [B*(K-1), 2] logits (index 0 = positive, index 1 = negative)
+	def _echo_logits(self, multi_rep, echo_rep, dominant_indices):
+		num_proto = multi_rep.size(1)
+
+		# L2-normalize all representations to unit sphere before dot product
+		multi_n = F.normalize(multi_rep, dim=-1)           # [B, K, D]
+		proto_n = F.normalize(self.prototype, dim=-1)      # [K, D]
+		echo_n  = F.normalize(echo_rep, dim=-1)            # [B, K, D]
+
+		# cosine similarity / temperature for each (user, prototype) pair
+		pos_logits = (multi_n * proto_n.unsqueeze(0)).sum(dim=-1) / self.temperature  # [B, K]
+		neg_logits = (multi_n * echo_n).sum(dim=-1) / self.temperature                # [B, K]
+
+		# stack into [B, K, 2] (index 0 = positive I_k, index 1 = negative u_echo_k)
+		all_logits = torch.stack([pos_logits, neg_logits], dim=-1)  # [B, K, 2]
+
+		# mask out dominant interest per user — only non-dominant k are used as anchor
+		prototype_range   = torch.arange(num_proto, device=multi_rep.device)  # [K]
+		dom_expanded      = dominant_indices.unsqueeze(1)                      # [B, 1]
+		non_dominant_mask = (prototype_range.unsqueeze(0) != dom_expanded)     # [B, K]
+
+		return all_logits[non_dominant_mask]  # [B*(K-1), 2]
+	# --- End helper ---
+
+	def forward(self, multi_rep, echo_rep, dominant_indices):
+		# --- Prototype-self logits (original MIECL contrastive loss) ---
+		# anchor: u_k (one interest of real user), positive: I_k (global prototype),
+		# negative: u_k' (different interest of same user). k chosen randomly per batch.
 		# 正负样本1:1，正样本为对应兴趣原型向量，负样本为随机抽取某兴趣条件下新闻语义表示
-		# anchor: n_i_k, positive: p_k, negative: n_i_k'
-			# to optimizie target user multi rep
-			positive_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1, ))
-			negative_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1, ))
-			while (positive_index == negative_index):
-				negative_index = torch.randint(low = 0, high = multi_rep.size(1), size = (1,))
+		positive_index = torch.randint(low=0, high=multi_rep.size(1), size=(1,), device=multi_rep.device)
+		negative_index = torch.randint(low=0, high=multi_rep.size(1), size=(1,), device=multi_rep.device)
+		while positive_index.item() == negative_index.item():
+			negative_index = torch.randint(low=0, high=multi_rep.size(1), size=(1,), device=multi_rep.device)
 
-			# multi rep - target user rep 
-			anchor = torch.index_select(multi_rep, dim = 1, index = positive_index)    # [30, 1, 400]
-			# uk, Ik -> positive pair
-			positive = torch.index_select(self.prototype, dim = 0, index = positive_index)	  # [1, 400]
-			# uk uj -> negative pair
-			negative = torch.index_select(multi_rep, dim = 1, index = negative_index)	# [30, 1, 400]
+		anchor   = torch.index_select(multi_rep, dim=1, index=positive_index).squeeze(dim=1)  # [B, D]
+		positive = torch.index_select(self.prototype, dim=0, index=positive_index)             # [1, D]
+		negative = torch.index_select(multi_rep, dim=1, index=negative_index).squeeze(dim=1)  # [B, D]
 
-			# y = uT.nc - user rep (anchor) x canddiate rep (+)
-			positive_logit = torch.matmul(anchor.squeeze(dim = 1), positive.transpose(-1, -2))	   # [30, 1]
-			# y = uT.nc - user rep (anchor) x canddiate rep (+)
-			negative_logit = torch.matmul(anchor, negative.transpose(-1, -2)).squeeze(dim = 2)	   # [30, 1]
-			logits = torch.cat([positive_logit, negative_logit], dim = -1)
-		return logits
+		# L2 normalize to unit sphere — prevents dot products from growing unbounded
+		anchor_n   = F.normalize(anchor, dim=-1)
+		positive_n = F.normalize(positive, dim=-1)
+		negative_n = F.normalize(negative, dim=-1)
+
+		# cosine similarity scaled by temperature
+		pos_logit    = torch.matmul(anchor_n, positive_n.t()) / self.temperature            # [B, 1]
+		neg_logit    = (anchor_n * negative_n).sum(dim=-1, keepdim=True) / self.temperature # [B, 1]
+		proto_logits = torch.cat([pos_logit, neg_logit], dim=-1)                            # [B, 2]
+
+		# --- Echo-Chamber Debiased logits ---
+		# anchor: u_k (real user, non-dominant interest k),
+		# positive: I_k (global prototype), negative: u_echo_k (echo-chamber user, same k)
+		# Computed for all K-1 non-dominant interests simultaneously -> [B*(K-1), 2]
+		echo_logits = self._echo_logits(multi_rep, echo_rep, dominant_indices)
+
+		return proto_logits, echo_logits
 	
 # intiliases various components of the model
 	# news_encoder - for encoding news articles
@@ -321,7 +359,7 @@ class InfoNCE(nn.Module):
 	# constrastive loss using InfoNCE (Noise Contrastive Estimation) between predicted logits and user repr
 
 class Multi_Rep_Predictor(nn.Module):
-	def __init__(self, num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode):
+	def __init__(self, num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode, temperature=0.07):
 		super().__init__()
 		self.news_encoder = News_Encoder(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, dropout_rate)
 		self.attention = MultiHeadAttention(num_head, hid_dim, hid_dim, dropout_rate)
@@ -333,7 +371,8 @@ class Multi_Rep_Predictor(nn.Module):
 		self.agg_mode = agg_mode
 		self.num_prototype = num_prototype
 		self.hid_dim = hid_dim
-		self.infoNCE = InfoNCE(hid_dim, infonce_mode, self.prototype)
+		# temperature controls sharpness of contrastive distribution (default 0.07 per SimCLR)
+		self.infoNCE = InfoNCE(hid_dim, infonce_mode, self.prototype, temperature=temperature)
 				
 		self.W = nn.Parameter(torch.Tensor(2 * hid_dim, hid_dim))
 		nn.init.xavier_uniform_(self.W.data, gain = 1.414)
@@ -357,12 +396,20 @@ class Multi_Rep_Predictor(nn.Module):
 		#nn.init.xavier_uniform_(self.wgcn2.data, gain = 1.414)
 		#nn.init.xavier_uniform_(self.wgcn3.data, gain = 1.414)
 
-	def forward(self, candidate_title, candidate_abstract, his_title, his_abstract):
+	def forward(self, candidate_title, candidate_abstract, his_title, his_abstract,
+	            echo_his_title=None, echo_his_abstract=None):
+		# echo_his_title / echo_his_abstract: optional echo-chamber augmented history
+		# shape identical to his_title / his_abstract: [batch, 50, word_len]
+		# only provided when infonce_mode == 'echo_chamber_debiased'
 		batch_size = candidate_title.size(0)
 
 		candidate_rep = self.news_encoder(candidate_title, candidate_abstract)	  # [30, 5, 400]
 		target_his_rep = self.news_encoder(his_title, his_abstract)    # [30, 50, 400]
 		target_his_rep = self.attention(target_his_rep.unsqueeze(dim = 0), target_his_rep.unsqueeze(dim = 0), target_his_rep.unsqueeze(dim = 0)).squeeze(dim = 0)
+
+		# save raw encoded history (before multi_rep_encoder) for dominant prototype computation
+		# shape: [B, 50, 400] — mean over articles gives [B, 400] user centroid
+		raw_his_rep = target_his_rep
 
 		target_his_rep = self.multi_rep_encoder(target_his_rep)  
 		#target_user_rep = torch.mean(target_his_rep, dim = 1)
@@ -401,10 +448,32 @@ class Multi_Rep_Predictor(nn.Module):
 		else:
 			pass
 
-		if self.contrastive_mode == 'USER':
-			user_infoNCE_logits = self.infoNCE(target_user_rep)
-			# contrastive loss and predictor loss
-			return predict_logits, user_infoNCE_logits
+		if self.contrastive_mode == 'USER' and self.training:
+			# --- Always compute BOTH contrastive losses during training ---
+			# Step 1: encode the echo-chamber augmented history through the same pipeline as real history
+			echo_his_rep = self.news_encoder(echo_his_title, echo_his_abstract)   # [B, 50, D]
+			echo_his_rep = self.attention(
+				echo_his_rep.unsqueeze(0), echo_his_rep.unsqueeze(0), echo_his_rep.unsqueeze(0)
+			).squeeze(0)                                                           # [B, 50, D]
+			echo_his_rep  = self.multi_rep_encoder(echo_his_rep)                   # [B, 50, K, D]
+			echo_user_rep = self.user_encoder(echo_his_rep)                        # [B, K, D]
+
+			# Step 2: identify dominant prototype per user from real history
+			# mean-pool raw encoded history [B, 50, D] -> [B, D], find closest prototype -> [B]
+			# dominant interest is excluded as anchor in the echo_chamber_debiased loss
+			mean_his            = raw_his_rep.mean(dim=1)                          # [B, D]
+			similarity_to_proto = torch.matmul(mean_his, self.prototype.t())        # [B, K]
+			dominant_indices    = similarity_to_proto.argmax(dim=1)                # [B]
+
+			# Step 3: InfoNCE always computes both logits and returns (proto_logits, echo_logits)
+			proto_logits, echo_logits = self.infoNCE(
+				target_user_rep,
+				echo_rep=echo_user_rep,
+				dominant_indices=dominant_indices
+			)
+			# return 3-tuple: main.py computes loss = pred + alpha*proto + beta*echo
+			return predict_logits, proto_logits, echo_logits
 		else:
-			return predict_logits, None
-		
+			# eval mode: contrastive logits not needed, return None placeholders
+			return predict_logits, None, None
+
