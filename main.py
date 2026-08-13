@@ -350,9 +350,23 @@ if __name__ == '__main__':
     #val_user = np.array_split(val_user, 8000)       # [9120, 1500] , [34200, 400], [30400, 450]
     # [90, 26600] [400, 6600]
 
-    epochs_to_eval = range(1, num_dataset * num_epoch + 1)
     if args.eval_epochs:
+        # (c) explicit list — evaluate exactly these epochs, nothing else
         epochs_to_eval = args.eval_epochs
+    elif val_only:
+        # (b) --val_only — discover every model_*.pkl present in preserve_dir
+        found = sorted(
+            int(f.split('_')[1].split('.')[0])
+            for f in os.listdir(preserve_dir)
+            if f.startswith('model_') and f.endswith('.pkl')
+        )
+        if not found:
+            raise FileNotFoundError(f'No model_*.pkl checkpoints found in {preserve_dir}')
+        print(f'--val_only: found {len(found)} checkpoints -> epochs {found}')
+        epochs_to_eval = found
+    else:
+        # (a) normal run or resume — always evaluate all epochs 1..total
+        epochs_to_eval = range(1, num_dataset * num_epoch + 1)
 
     for epoch_idx in epochs_to_eval:
         #model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode)
