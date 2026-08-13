@@ -72,6 +72,8 @@ if __name__ == '__main__':
                         help='Batch size to use during evaluation to prevent OOM (default 32).')
     parser.add_argument('--eval_epochs', type=int, nargs='+', default=[],
                         help='Specific epochs to evaluate (e.g., --eval_epochs 1 20 200). If empty, evaluates all.')
+    parser.add_argument('--resume_epoch', type=int, default=0,
+                        help='Resume training from this epoch. Loads model_{n}.pkl and skips epochs 1..n.')
     args = parser.parse_args()
 
     num_epoch        = args.num_epoch
@@ -102,6 +104,7 @@ if __name__ == '__main__':
     preserve_dir     = args.preserve_dir
     val_only         = args.val_only
     eval_batch_size  = args.eval_batch_size
+    resume_epoch     = args.resume_epoch
 
     if not os.path.exists(preserve_dir):
         os.makedirs(preserve_dir)
@@ -154,11 +157,23 @@ if __name__ == '__main__':
         model = nn.DataParallel(model)
     model = model.to(device)
 
+    # --- Resume from checkpoint ---
+    if resume_epoch > 0:
+        ckpt_path = os.path.join(preserve_dir, f'model_{resume_epoch}.pkl')
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f'Checkpoint not found: {ckpt_path}')
+        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        print(f'Resumed from checkpoint: {ckpt_path}')
+        print(f'Skipping epochs 1 to {resume_epoch}, resuming from epoch {resume_epoch + 1}.')
+
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     # CosineAnnealingLR: decays lr smoothly from lr -> 1e-5 over all epochs
     T_max = max(num_epoch * num_dataset, 1)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max, eta_min=1e-5)
+    # Fast-forward scheduler to match the resumed epoch
+    for _ in range(resume_epoch):
+        scheduler.step()
 
     best_epoch = 0
     min_loss   = float('inf')
@@ -179,6 +194,11 @@ if __name__ == '__main__':
 
             for n_ep in range(num_epoch):
                 curr_epoch = n_d * num_epoch + n_ep + 1
+
+                # Skip already-completed epochs when resuming
+                if curr_epoch <= resume_epoch:
+                    print(f'Skipping epoch {curr_epoch} (already trained).')
+                    continue
 
                 # Open per-epoch CSV log
                 log_path   = os.path.join(preserve_dir, f'epoch_{curr_epoch:03d}_loss_log.csv')
