@@ -39,6 +39,13 @@ class DataProcess():
         self.train_user_his = []
         self.user_his_pad = {0: [0] * 50, }
         self.user_his_complete = {0: [], }
+
+        # Counterfactual augmentation: parallel dicts for cf news
+        self.news_title_cf_dict   = {'0': [0] * 20}
+        self.news_abstract_cf_dict = {'0': [0] * 40}
+        self.news_cf_map = {}           # orig news_id (str) -> cf news_id (str)
+        self.news_id_cf_internal = {}   # orig internal int id -> cf internal int id
+        self.user_his_cf_pad = {0: [0] * 50}
         
         self.val_index = []
         self.val_candidate = []
@@ -151,7 +158,7 @@ class DataProcess():
 # acts as a wrapper for the process_news function
     # processes news from 2 files - small_train and small_dev
     # extracts the title and abstract of every article in these files
-    def process_train_val_news(self):
+    def process_train_val_news(self, cf_tsv=None, cf_map_json=None):
         print ('process news start')
         self.process_news(self.file1)
         self.process_news(self.file2)
@@ -159,10 +166,72 @@ class DataProcess():
         self.news_abstract = np.array(list(self.news_abstract_dict.values()), dtype = 'int32')
         self.news_entity = np.array(list(self.news_entity_dict.values()), dtype = 'int32')
         print ('news_title.shape: ', self.news_title.shape, 'news_abstract.shape: ', self.news_abstract.shape)
+
+        # Counterfactual augmentation: load cf news if paths provided
+        if cf_tsv is not None and cf_map_json is not None:
+            self.process_cf_news(cf_tsv, cf_map_json)
+            self.news_title_cf   = np.array(list(self.news_title_cf_dict.values()),   dtype='int32')
+            self.news_abstract_cf = np.array(list(self.news_abstract_cf_dict.values()), dtype='int32')
+            print('news_title_cf.shape:', self.news_title_cf.shape,
+                  'news_abstract_cf.shape:', self.news_abstract_cf.shape)
+        else:
+            self.news_title_cf    = None
+            self.news_abstract_cf = None
+
         print ('process news finished')
-        #return self.news_title, self.news_abstract, self.news_entity
-        #return self.news_title, self.news_entity
-        return self.news_title, self.news_abstract
+        return self.news_title, self.news_abstract, self.news_title_cf, self.news_abstract_cf
+
+    def process_cf_news(self, cf_tsv, cf_map_json):
+        """
+        Reads news_cf.tsv and news_cf_map.json.
+        Populates news_title_cf_dict, news_abstract_cf_dict, and news_id_cf_internal.
+        For articles with no cf version, news_id_cf_internal maps to 0 (padding).
+        """
+        import json as _json
+
+        # Load the string-level map: orig_news_id_str -> cf_news_id_str
+        with open(cf_map_json, 'r', encoding='utf-8') as f:
+            self.news_cf_map = _json.load(f)
+
+        # Process cf news TSV — reuses word_dict built by process_news (no new words added)
+        from nltk.tokenize import word_tokenize as _wt
+        with open(cf_tsv, 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) < 5:
+                    continue
+                cf_news_id_str = parts[0]   # e.g. "N12345_cf"
+                title_text     = parts[3]
+                abstract_text  = parts[4]
+
+                # Assign an internal integer id for this cf article
+                if cf_news_id_str not in self.news_id:
+                    self.news_id[cf_news_id_str] = len(self.news_id)
+                cf_int_id = self.news_id[cf_news_id_str]
+
+                # Tokenize and map words using existing word_dict (unknown words -> 0)
+                title_tokens = _wt(title_text.lower())[:20]
+                title_ids    = [self.word_dict.get(w, 0) for w in title_tokens]
+                title_ids    = title_ids + [0] * (20 - len(title_ids))
+
+                abstract_tokens = _wt(abstract_text.lower())[:40]
+                abstract_ids    = [self.word_dict.get(w, 0) for w in abstract_tokens]
+                abstract_ids    = abstract_ids + [0] * (40 - len(abstract_ids))
+
+                if cf_int_id not in self.news_title_cf_dict:
+                    self.news_title_cf_dict[cf_int_id]    = title_ids
+                if cf_int_id not in self.news_abstract_cf_dict:
+                    self.news_abstract_cf_dict[cf_int_id] = abstract_ids
+
+        # Build orig_internal_id -> cf_internal_id mapping
+        # For articles with no cf version, map to 0 (padding row, will give zero gradient)
+        for orig_str, cf_str in self.news_cf_map.items():
+            orig_int = self.news_id.get(orig_str, 0)
+            cf_int   = self.news_id.get(cf_str, 0)
+            self.news_id_cf_internal[orig_int] = cf_int
+
+
+        print(f'[process_cf_news] {len(self.news_cf_map)} cf articles loaded.')
 
     # to generate user history based on the dev_beh and train_beh
     def generate_user_his(self):
@@ -209,7 +278,16 @@ class DataProcess():
                 self.user_his_pad[self.userid_dict[line[1]]] = click_his_pad
                 self.user_his_complete[self.userid_dict[line[1]]] = click_his_complete
         f4.close()
-        return self.user_his_pad
+
+        # Build counterfactual user history:
+        # For each user's history article, look up its cf version.
+        # If no cf version exists for an article, keep 0 (padding — gives zero gradient).
+        for uid, his_pad in self.user_his_pad.items():
+            cf_his = [self.news_id_cf_internal.get(nid, 0) for nid in his_pad]
+            self.user_his_cf_pad[uid] = cf_his
+
+        return self.user_his_pad, self.user_his_cf_pad
+
 
     # 处理训练集数据
     # aim is to process the training behaviors, generates + and - samples, shuffles and organizes them

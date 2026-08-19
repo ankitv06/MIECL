@@ -31,6 +31,10 @@ if __name__ == '__main__':
     parser.add_argument('--num_head', type=int, default=20)
     parser.add_argument('--num_prototype', type=int, default=5)
     parser.add_argument('--alpha', type=float, default=1.0)
+    parser.add_argument('--alpha1', type=float, default=1.0,
+                        help='Weight for prototype contrastive loss (used in CF mode)')
+    parser.add_argument('--alpha2', type=float, default=1.0,
+                        help='Weight for counterfactual contrastive loss (used in CF mode)')
     parser.add_argument('--num_negative_sample', type=int, default=3)
     parser.add_argument('--word_dim', type=int, default=300)
     parser.add_argument('--preserve_dir', type=str, default='C:/Users/anany/Desktop/Ananya/2023/Estonia Projects/News Recc/MIECL-master')
@@ -66,6 +70,8 @@ if __name__ == '__main__':
     pretrain_method = args.pretrain_method
     num_prototype = args.num_prototype
     alpha = args.alpha
+    alpha1 = args.alpha1
+    alpha2 = args.alpha2
     dropout_rate = args.dropout_rate
     multi_rep_mode = args.multi_rep_mode
     infonce_mode = args.infonce_mode
@@ -85,8 +91,32 @@ if __name__ == '__main__':
     file5 = os.path.join(dataset_dir, 'glove.840B.300d.txt')
     file6 = 'dummy.txt'
 
+    # ── Counterfactual augmentation: auto-generate cf files if needed ──────────
+    cf_tsv      = os.path.join(dataset_dir, 'MINDsmall_train/news_cf.tsv')
+    cf_map_json = os.path.join(dataset_dir, 'MINDsmall_train/news_cf_map.json')
+    if contrastive_mode == 'CF':
+        if not (os.path.exists(cf_tsv) and os.path.exists(cf_map_json)):
+            print('[main] CF mode: news_cf.tsv not found — running generate_cf_news.py...')
+            from generate_cf_news import run as run_cf_gen
+            run_cf_gen(dataset_dir)
+            if not (os.path.exists(cf_tsv) and os.path.exists(cf_map_json)):
+                raise RuntimeError('generate_cf_news failed to produce output files. Aborting.')
+        else:
+            print('[main] CF mode: news_cf.tsv already exists — skipping generation.')
+    # ──────────────────────────────────────────────────────────────────────────
+
     data_module = DataProcess(file1, file2, file3, file4, file5, file6)
-    news_title, news_abstract = data_module.process_train_val_news()
+
+    if contrastive_mode == 'CF':
+        news_title, news_abstract, news_title_cf, news_abstract_cf = \
+            data_module.process_train_val_news(cf_tsv=cf_tsv, cf_map_json=cf_map_json)
+        news_title_cf    = torch.LongTensor(news_title_cf)
+        news_abstract_cf = torch.LongTensor(news_abstract_cf)
+    else:
+        news_title, news_abstract, _, _ = data_module.process_train_val_news()
+        news_title_cf    = None
+        news_abstract_cf = None
+
     news_title, news_abstract = torch.LongTensor(news_title), torch.LongTensor(news_abstract)
     
     entity_matrix = data_module.generate_entity_matrix()
@@ -96,7 +126,13 @@ if __name__ == '__main__':
     if pretrain_method == 'glove':
         word_matrix = data_module.load_glove()
 
-    user_his = data_module.generate_user_his()
+    if contrastive_mode == 'CF':
+        user_his, user_his_cf = data_module.generate_user_his()
+        user_his_cf = torch.LongTensor(np.array(list(user_his_cf.values()), dtype='int32'))
+    else:
+        user_his, _ = data_module.generate_user_his()
+        user_his_cf = None
+
     user_his = torch.LongTensor(np.array(list(user_his.values()), dtype = 'int32'))
     print ('num_user: ', len(user_his))
     
@@ -156,28 +192,43 @@ if __name__ == '__main__':
                     candidate_abstract, his_abstract  = news_abstract[train_candidate].to(device), news_abstract[user_his[train_user]].to(device)
                     candidate_abstract, his_abstract  = Variable(candidate_abstract),Variable(his_abstract)
                     print (candidate_title.size(), candidate_abstract.size())
-    
-                    #neighbor_user = user_adj[train_user]
-                    #(neighbor_1, neighbor_2) = torch.split(neighbor_user, 1, dim = 1)
-                    #neighbor_1, neighbor_2 = neighbor_1.squeeze(dim = 1), neighbor_2.squeeze(dim = 1)
-                    
-                    #nei1_title, nei1_abstract  = news_title[user_his[neighbor_1]].cuda(), news_abstract[user_his[neighbor_1]].cuda()
-                    #nei1_title, nei1_abstract = Variable(nei1_title), Variable(nei1_abstract)
-                    #nei2_title, nei2_abstract  = news_title[user_his[neighbor_2]].cuda(), news_abstract[user_his[neighbor_2]].cuda()
-                    #nei2_title, nei2_abstract = Variable(nei2_title), Variable(nei2_abstract)
+
+                    # Load CF history if in CF mode
+                    if contrastive_mode == 'CF':
+                        his_title_cf    = news_title_cf[user_his_cf[train_user]].to(device)
+                        his_abstract_cf = news_abstract_cf[user_his_cf[train_user]].to(device)
+                        his_title_cf    = Variable(his_title_cf)
+                        his_abstract_cf = Variable(his_abstract_cf)
+                    else:
+                        his_title_cf    = None
+                        his_abstract_cf = None
     
                     model.train()
                     optimizer.zero_grad()
     
-                    #predictor_logits, user_infoNCE_logits = model(candidate_title, candidate_abstract, his_title, his_abstract, neighbor_title, neighbor_abstract)
-                    predictor_logits, user_infoNCE_logits = model(candidate_title, candidate_abstract, his_title, his_abstract)
+                    predictor_logits, proto_logits, cf_logits = model(
+                        candidate_title, candidate_abstract,
+                        his_title, his_abstract,
+                        his_title_cf, his_abstract_cf
+                    )
                     predictor_loss = criterion(predictor_logits, train_label)
                     
                     if contrastive_mode == 'USER':
-                        user_infoNCE_labels = torch.zeros(len(user_infoNCE_logits), dtype=torch.long, device=device)
-                        user_infoNCE_loss = F.cross_entropy(user_infoNCE_logits, user_infoNCE_labels)
+                        user_infoNCE_labels = torch.zeros(len(proto_logits), dtype=torch.long, device=device)
+                        user_infoNCE_loss = F.cross_entropy(proto_logits, user_infoNCE_labels)
                         print ('predictor_loss: ', predictor_loss.data.item(), 'user_infoNCE_loss: ', user_infoNCE_loss.data.item())
                         loss = predictor_loss + alpha * user_infoNCE_loss
+
+                    elif contrastive_mode == 'CF':
+                        proto_labels = torch.zeros(len(proto_logits), dtype=torch.long, device=device)
+                        cf_labels    = torch.zeros(len(cf_logits),    dtype=torch.long, device=device)
+                        proto_loss   = F.cross_entropy(proto_logits, proto_labels)
+                        cf_loss      = F.cross_entropy(cf_logits,    cf_labels)
+                        print('predictor_loss:', predictor_loss.data.item(),
+                              'proto_loss:', proto_loss.data.item(),
+                              'cf_loss:', cf_loss.data.item())
+                        loss = predictor_loss + alpha1 * proto_loss + alpha2 * cf_loss
+
                     else:
                         print ('predictor_loss: ', predictor_loss.data.item())
                         loss = predictor_loss
@@ -188,8 +239,8 @@ if __name__ == '__main__':
                     loss_per_epoch.append(loss.data.item())
                     print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'step: {:04d}'.format(step + 1), 'loss: {:.4f}'.format(np.mean(loss_per_epoch)), 'time: {:.4f}'.format(time.time() - t1))
 
-                torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(n_d * num_epoch + n_ep + 1))
-                print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'time: {:.4f}'.format(time.time() - t0))
+            torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(n_d * num_epoch + n_ep + 1))
+            print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'time: {:.4f}'.format(time.time() - t0))
         del train_candidate, train_user, train_label
     else:
         print("Skipping training, starting validation from saved checkpoint...")

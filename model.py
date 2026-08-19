@@ -281,7 +281,7 @@ class InfoNCE(nn.Module):
 		self.W = nn.Parameter(torch.Tensor(hid_dim, hid_dim))
 		nn.init.xavier_uniform_(self.W, gain = 1.414)
 
-	def forward(self, multi_rep):
+	def forward(self, multi_rep, multi_rep_cf=None):
 		if self.mode == 'prototype_self':
 		# 正负样本1:1，正样本为对应兴趣原型向量，负样本为随机抽取某兴趣条件下新闻语义表示
 		# anchor: n_i_k, positive: p_k, negative: n_i_k'
@@ -303,6 +303,26 @@ class InfoNCE(nn.Module):
 			# y = uT.nc - user rep (anchor) x canddiate rep (+)
 			negative_logit = torch.matmul(anchor, negative.transpose(-1, -2)).squeeze(dim = 2)	   # [30, 1]
 			logits = torch.cat([positive_logit, negative_logit], dim = -1)
+
+		elif self.mode == 'counterfactual':
+			# anchor: u_k (original), positive: u_k_cf (counterfactual), negative: u_j (j != k)
+			# multi_rep_cf must be passed when this mode is used
+			k_index = torch.randint(low=0, high=multi_rep.size(1), size=(1,)).to(multi_rep.device)
+			j_index = torch.randint(low=0, high=multi_rep.size(1), size=(1,)).to(multi_rep.device)
+			while j_index == k_index:
+				j_index = torch.randint(low=0, high=multi_rep.size(1), size=(1,)).to(multi_rep.device)
+
+			anchor   = torch.index_select(multi_rep,    dim=1, index=k_index)     # [B, 1, 400]
+			positive = torch.index_select(multi_rep_cf, dim=1, index=k_index)     # [B, 1, 400]
+			negative = torch.index_select(multi_rep,    dim=1, index=j_index)     # [B, 1, 400]
+
+			# anchor . u_k_cf  -> positive logit  [B, 1]
+			positive_logit = torch.matmul(anchor.squeeze(dim=1),
+			                              positive.squeeze(dim=1).transpose(-1, -2))  # [B, 1]
+			# anchor . u_j     -> negative logit  [B, 1]
+			negative_logit = torch.matmul(anchor, negative.transpose(-1, -2)).squeeze(dim=2)  # [B, 1]
+			logits = torch.cat([positive_logit, negative_logit], dim=-1)   # [B, 2]
+
 		return logits
 	
 # intiliases various components of the model
@@ -350,14 +370,8 @@ class Multi_Rep_Predictor(nn.Module):
 		self.proj = nn.Parameter(torch.Tensor(200, 1))
 		nn.init.xavier_uniform_(self.w5.data, gain = 1.414)
 		nn.init.xavier_uniform_(self.proj.data, gain = 1.414)
-		#self.wgcn1 = nn.Parameter(torch.Tensor(hid_dim, hid_dim))
-		#self.wgcn2 = nn.Parameter(torch.Tensor(hid_dim, hid_dim))
-		#self.wgcn3 = nn.Parameter(torch.Tensor(hid_dim, hid_dim))
-		#nn.init.xavier_uniform_(self.wgcn1.data, gain = 1.414)
-		#nn.init.xavier_uniform_(self.wgcn2.data, gain = 1.414)
-		#nn.init.xavier_uniform_(self.wgcn3.data, gain = 1.414)
 
-	def forward(self, candidate_title, candidate_abstract, his_title, his_abstract):
+	def forward(self, candidate_title, candidate_abstract, his_title, his_abstract, his_title_cf=None, his_abstract_cf=None):
 		batch_size = candidate_title.size(0)
 
 		candidate_rep = self.news_encoder(candidate_title, candidate_abstract)	  # [30, 5, 400]
@@ -404,7 +418,29 @@ class Multi_Rep_Predictor(nn.Module):
 		if self.contrastive_mode == 'USER':
 			user_infoNCE_logits = self.infoNCE(target_user_rep)
 			# contrastive loss and predictor loss
-			return predict_logits, user_infoNCE_logits
+			return predict_logits, user_infoNCE_logits, None
+
+		elif self.contrastive_mode == 'CF':
+			# Prototype loss (same as USER mode)
+			proto_logits = self.infoNCE(target_user_rep)
+
+			# Counterfactual loss: encode cf history, compute u_k_cf, pass to InfoNCE
+			target_his_cf = self.news_encoder(his_title_cf, his_abstract_cf)          # [B, 50, 400]
+			target_his_cf = self.attention(
+				target_his_cf.unsqueeze(dim=0),
+				target_his_cf.unsqueeze(dim=0),
+				target_his_cf.unsqueeze(dim=0)
+			).squeeze(dim=0)
+			target_his_cf   = self.multi_rep_encoder(target_his_cf)
+			target_user_rep_cf = self.user_encoder(target_his_cf)                     # [B, K, 400]
+
+			# Temporarily switch InfoNCE mode to counterfactual
+			orig_mode = self.infoNCE.mode
+			self.infoNCE.mode = 'counterfactual'
+			cf_logits = self.infoNCE(target_user_rep, multi_rep_cf=target_user_rep_cf)
+			self.infoNCE.mode = orig_mode
+
+			return predict_logits, proto_logits, cf_logits
+
 		else:
-			return predict_logits, None
-		
+			return predict_logits, None, None
