@@ -49,6 +49,8 @@ if __name__ == '__main__':
                         help='Specific epochs to evaluate (e.g., --eval_epochs 1 20 200). If empty, evaluates all.')
     parser.add_argument('--eval_batch_size', type=int, default=32,
                         help='Batch size to use during evaluation to prevent OOM (default 32).')
+    parser.add_argument('--resume_epoch', type=int, default=0,
+                        help='Resume training from this epoch checkpoint. E.g., --resume_epoch 24 loads model_24.pkl and trains from epoch 25 onwards.')
     args = parser.parse_args()
 
     num_epoch = args.num_epoch
@@ -98,12 +100,6 @@ if __name__ == '__main__':
     user_his = torch.LongTensor(np.array(list(user_his.values()), dtype = 'int32'))
     print ('num_user: ', len(user_his))
     
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode)
-    model = model.to(device)
-    if torch.cuda.is_available():
-        model = nn.DataParallel(model)
- 
     #user_adj = []
     #f = open('small_user_nei_sort.txt', 'r', encoding='utf-8')
     #lines = f.readlines()
@@ -112,7 +108,6 @@ if __name__ == '__main__':
     #    user_adj.append([int(i) for i in line])
     #user_adj = torch.LongTensor(np.array(user_adj, dtype = 'int32'))
     #print ('user_adj.size: ', user_adj.size())
-    
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode)
@@ -120,9 +115,8 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         model = nn.DataParallel(model)
     
-    #model.load_state_dict(torch.load('/home/wangshicheng/news_recommendation/Final_edtion/title_abstract_edition/concat_dr0.0_prototype_other_user_nogat_soft_6_3_5_s/model_{}.pkl'.format(i + 1)))
-    #model.load_state_dict(torch.load('/home/wangshicheng/news_recommendation/Final_edtion/title_abstract_edition/sgd_other2_10_1_5_l_adam_val_2/model_6.pkl'))
-    model = model
+    #model.load_state_dict(torch.load('...'))
+    #model.load_state_dict(torch.load('...'))
     
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
@@ -133,6 +127,13 @@ if __name__ == '__main__':
     min_loss = float('inf')
 
     if not args.eval_only:
+        if args.resume_epoch > 0:
+            resume_path = os.path.join(preserve_dir, 'model_{}.pkl'.format(args.resume_epoch))
+            if not os.path.exists(resume_path):
+                raise FileNotFoundError('Resume checkpoint not found: {}'.format(resume_path))
+            print('Resuming training from epoch {} (loaded {})'.format(args.resume_epoch + 1, resume_path))
+            model.load_state_dict(torch.load(resume_path, map_location=device))
+
         for n_d in range(num_dataset):
             # training loop
             [train_candidate, train_user, train_label] = data_module.pre_train_behaviors()
@@ -140,6 +141,9 @@ if __name__ == '__main__':
             train_loader = Data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
             
             for n_ep in range(num_epoch):
+                current_epoch = n_d * num_epoch + n_ep + 1
+                if args.resume_epoch > 0 and current_epoch <= args.resume_epoch:
+                    continue
                 acc, all = 0, 0
                 t0 = time.time()
                 loss_per_epoch = []
@@ -184,8 +188,8 @@ if __name__ == '__main__':
                     loss_per_epoch.append(loss.data.item())
                     print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'step: {:04d}'.format(step + 1), 'loss: {:.4f}'.format(np.mean(loss_per_epoch)), 'time: {:.4f}'.format(time.time() - t1))
 
-            torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(n_d * num_epoch + n_ep + 1))
-            print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'time: {:.4f}'.format(time.time() - t0))
+                torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(n_d * num_epoch + n_ep + 1))
+                print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'time: {:.4f}'.format(time.time() - t0))
         del train_candidate, train_user, train_label
     else:
         print("Skipping training, starting validation from saved checkpoint...")
@@ -222,9 +226,20 @@ if __name__ == '__main__':
     val_dataset = Data.TensorDataset(val_candidate, val_user, val_label)
     val_loader = Data.DataLoader(dataset=val_dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=2)
 
-    epochs_to_eval = range(1, num_dataset * num_epoch + 1)
     if args.eval_epochs:
         epochs_to_eval = args.eval_epochs
+    elif args.eval_only:
+        existing_pkls = glob.glob(os.path.join(preserve_dir, 'model_*.pkl'))
+        epochs_to_eval = sorted([
+            int(os.path.basename(p).replace('model_', '').replace('.pkl', ''))
+            for p in existing_pkls
+        ])
+        if not epochs_to_eval:
+            print('No model_*.pkl files found in {}'.format(preserve_dir))
+        else:
+            print('eval_only: found checkpoints for epochs: {}'.format(epochs_to_eval))
+    else:
+        epochs_to_eval = range(1, num_dataset * num_epoch + 1)
 
     for epoch_idx in epochs_to_eval:
         #model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode)
@@ -238,8 +253,7 @@ if __name__ == '__main__':
             print("Checkpoint not found:", checkpoint_path)
             continue
             
-        model.load_state_dict(torch.load(checkpoint_path))
-        model = model
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
         model.eval()
         val_score = []
         t = time.time()        
@@ -295,7 +309,6 @@ if __name__ == '__main__':
         predict_file = open(preserve_dir + '/prediction_{}.txt'.format(epoch_idx), 'w')
         print ('process predict_file_{} start'.format(epoch_idx))
 
-        cnt = 0
         for idx, i in enumerate(val_index):
             i_score = [item for item in val_score[i[0]: i[1]]]
             i_score_sort = sorted(i_score, reverse=True)
