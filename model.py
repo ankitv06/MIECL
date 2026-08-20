@@ -433,6 +433,10 @@ class Multi_Rep_Predictor(nn.Module):
 			return predict_logits, user_infoNCE_logits, None
 
 		elif self.contrastive_mode == 'CF':
+			# During evaluation, we don't need to compute contrastive losses
+			if not self.training:
+				return predict_logits, None, None
+
 			# Prototype loss (same as USER mode)
 			proto_logits = self.infoNCE(target_user_rep)
 
