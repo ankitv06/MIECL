@@ -41,8 +41,9 @@ class DataProcess():
         self.user_his_complete = {0: [], }
 
         # Counterfactual augmentation: parallel dicts for cf news
-        self.news_title_cf_dict   = {'0': [0] * 20}
-        self.news_abstract_cf_dict = {'0': [0] * 40}
+        self.cf_news_id = {'NULL': 0}
+        self.news_title_cf_dict   = {0: [0] * 20}
+        self.news_abstract_cf_dict = {0: [0] * 40}
         self.news_cf_map = {}           # orig news_id (str) -> cf news_id (str)
         self.news_id_cf_internal = {}   # orig internal int id -> cf internal int id
         self.user_his_cf_pad = {0: [0] * 50}
@@ -205,9 +206,9 @@ class DataProcess():
                 abstract_text  = parts[4]
 
                 # Assign an internal integer id for this cf article
-                if cf_news_id_str not in self.news_id:
-                    self.news_id[cf_news_id_str] = len(self.news_id)
-                cf_int_id = self.news_id[cf_news_id_str]
+                if cf_news_id_str not in self.cf_news_id:
+                    self.cf_news_id[cf_news_id_str] = len(self.cf_news_id)
+                cf_int_id = self.cf_news_id[cf_news_id_str]
 
                 # Tokenize and map words using existing word_dict (unknown words -> 0)
                 title_tokens = _wt(title_text.lower())[:20]
@@ -227,9 +228,8 @@ class DataProcess():
         # For articles with no cf version, map to 0 (padding row, will give zero gradient)
         for orig_str, cf_str in self.news_cf_map.items():
             orig_int = self.news_id.get(orig_str, 0)
-            cf_int   = self.news_id.get(cf_str, 0)
+            cf_int   = self.cf_news_id.get(cf_str, 0)
             self.news_id_cf_internal[orig_int] = cf_int
-
 
         print(f'[process_cf_news] {len(self.news_cf_map)} cf articles loaded.')
 
