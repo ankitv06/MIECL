@@ -234,24 +234,21 @@ if __name__ == '__main__':
                     if contrastive_mode == 'USER':
                         user_infoNCE_labels = torch.zeros(len(proto_logits), dtype=torch.long, device=device)
                         user_infoNCE_loss = F.cross_entropy(proto_logits, user_infoNCE_labels)
-                        scaled_proto = alpha * user_infoNCE_loss
-                        val_proto = scaled_proto.item()
-                        print('predictor_loss:', predictor_loss.data.item(), 'user_infoNCE_loss (x alpha):', val_proto)
-                        loss = predictor_loss + scaled_proto
+                        val_proto = user_infoNCE_loss.item()
+                        print('predictor_loss:', predictor_loss.data.item(), 'user_infoNCE_loss (raw):', val_proto)
+                        loss = predictor_loss + alpha * user_infoNCE_loss
 
                     elif contrastive_mode == 'CF':
                         proto_labels = torch.zeros(len(proto_logits), dtype=torch.long, device=device)
                         cf_labels    = torch.zeros(len(cf_logits),    dtype=torch.long, device=device)
                         proto_loss   = F.cross_entropy(proto_logits, proto_labels)
                         cf_loss      = F.cross_entropy(cf_logits,    cf_labels)
-                        scaled_proto = alpha1 * proto_loss
-                        scaled_cf    = alpha2 * cf_loss
-                        val_proto    = scaled_proto.item()
-                        val_cf       = scaled_cf.item()
+                        val_proto    = proto_loss.item()
+                        val_cf       = cf_loss.item()
                         print('predictor_loss:', predictor_loss.data.item(),
-                              'proto_CL_loss (x alpha1):', val_proto,
-                              'cf_loss (x alpha2):', val_cf)
-                        loss = predictor_loss + scaled_proto + scaled_cf
+                              'proto_CL_loss (raw):', val_proto,
+                              'cf_loss (raw):', val_cf)
+                        loss = predictor_loss + alpha1 * proto_loss + alpha2 * cf_loss
 
                     else:
                         print ('predictor_loss: ', predictor_loss.data.item())
