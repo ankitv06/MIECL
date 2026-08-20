@@ -18,6 +18,7 @@ import pickle
 import argparse
 import os
 import glob
+import csv
 
 
 if __name__ == '__main__':
@@ -191,6 +192,12 @@ if __name__ == '__main__':
                 t0 = time.time()
                 loss_per_epoch = []
 
+                # Initialize CSV logging for this epoch
+                epoch_csv_path = os.path.join(preserve_dir, f'epoch_{current_epoch:03d}_loss_log.csv')
+                epoch_csv_file = open(epoch_csv_path, 'w', newline='')
+                csv_writer = csv.writer(epoch_csv_file)
+                csv_writer.writerow(['epoch', 'step', 'predictor_loss', 'proto_CL_loss', 'cf_loss', 'total_loss', 'mean_loss', 'grad_norm', 'lr', 'step_time_s'])
+
                 # batches from the training loader
                 for step, (train_candidate, train_user, train_label) in enumerate(train_loader):
                     t1 = time.time()
@@ -220,9 +227,14 @@ if __name__ == '__main__':
                     )
                     predictor_loss = criterion(predictor_logits, train_label)
                     
+                    val_pred = predictor_loss.item()
+                    val_proto = 0.0
+                    val_cf = 0.0
+
                     if contrastive_mode == 'USER':
                         user_infoNCE_labels = torch.zeros(len(proto_logits), dtype=torch.long, device=device)
                         user_infoNCE_loss = F.cross_entropy(proto_logits, user_infoNCE_labels)
+                        val_proto = user_infoNCE_loss.item()
                         print ('predictor_loss: ', predictor_loss.data.item(), 'user_infoNCE_loss: ', user_infoNCE_loss.data.item())
                         loss = predictor_loss + alpha * user_infoNCE_loss
 
@@ -231,6 +243,8 @@ if __name__ == '__main__':
                         cf_labels    = torch.zeros(len(cf_logits),    dtype=torch.long, device=device)
                         proto_loss   = F.cross_entropy(proto_logits, proto_labels)
                         cf_loss      = F.cross_entropy(cf_logits,    cf_labels)
+                        val_proto    = proto_loss.item()
+                        val_cf       = cf_loss.item()
                         print('predictor_loss:', predictor_loss.data.item(),
                               'proto_loss:', proto_loss.data.item(),
                               'cf_loss:', cf_loss.data.item())
@@ -241,12 +255,29 @@ if __name__ == '__main__':
                         loss = predictor_loss
                         
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    if isinstance(grad_norm, torch.Tensor):
+                        grad_norm_val = grad_norm.item()
+                    else:
+                        grad_norm_val = grad_norm
+                        
                     optimizer.step()
     
                     loss_per_epoch.append(loss.data.item())
-                    print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'step: {:04d}'.format(step + 1), 'loss: {:.4f}'.format(np.mean(loss_per_epoch)), 'time: {:.4f}'.format(time.time() - t1))
+                    step_time = time.time() - t1
+                    
+                    csv_writer.writerow([
+                        current_epoch, step + 1,
+                        val_pred, val_proto, val_cf,
+                        loss.item(), np.mean(loss_per_epoch),
+                        grad_norm_val, optimizer.param_groups[0]['lr'],
+                        step_time
+                    ])
+                    epoch_csv_file.flush()
+                    
+                    print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'step: {:04d}'.format(step + 1), 'loss: {:.4f}'.format(np.mean(loss_per_epoch)), 'time: {:.4f}'.format(step_time))
 
+                epoch_csv_file.close()
                 torch.save(model.state_dict(), preserve_dir + '/model_{}.pkl'.format(n_d * num_epoch + n_ep + 1))
                 print('epoch: {:04d}'.format(n_d * num_epoch + n_ep + 1), 'time: {:.4f}'.format(time.time() - t0))
         del train_candidate, train_user, train_label
