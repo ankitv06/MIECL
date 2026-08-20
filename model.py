@@ -273,10 +273,12 @@ class Multi_Rep_User_Encoder(nn.Module):
 		return multi_user_rep
 
 class InfoNCE(nn.Module):
-	def __init__(self, hid_dim, infonce_mode, prototype):
+	def __init__(self, hid_dim, infonce_mode, prototype, temp_proto=0.1, temp_cf=0.1):
 		super().__init__()
 		self.mode = infonce_mode
 		self.prototype = prototype
+		self.temp_proto = temp_proto
+		self.temp_cf = temp_cf
 
 		self.W = nn.Parameter(torch.Tensor(hid_dim, hid_dim))
 		nn.init.xavier_uniform_(self.W, gain = 1.414)
@@ -298,10 +300,15 @@ class InfoNCE(nn.Module):
 			# uk uj -> negative pair
 			negative = torch.index_select(multi_rep, dim = 1, index = negative_index)	# [30, 1, 400]
 
+			# L2 normalization for stability
+			anchor = F.normalize(anchor, p=2, dim=-1)
+			positive = F.normalize(positive, p=2, dim=-1)
+			negative = F.normalize(negative, p=2, dim=-1)
+
 			# y = uT.nc - user rep (anchor) x canddiate rep (+)
-			positive_logit = torch.matmul(anchor.squeeze(dim = 1), positive.transpose(-1, -2))	   # [30, 1]
+			positive_logit = torch.matmul(anchor.squeeze(dim = 1), positive.transpose(-1, -2)) / self.temp_proto   # [30, 1]
 			# y = uT.nc - user rep (anchor) x canddiate rep (+)
-			negative_logit = torch.matmul(anchor, negative.transpose(-1, -2)).squeeze(dim = 2)	   # [30, 1]
+			negative_logit = torch.matmul(anchor, negative.transpose(-1, -2)).squeeze(dim = 2) / self.temp_proto   # [30, 1]
 			logits = torch.cat([positive_logit, negative_logit], dim = -1)
 
 		elif self.mode == 'counterfactual':
@@ -316,11 +323,16 @@ class InfoNCE(nn.Module):
 			positive = torch.index_select(multi_rep_cf, dim=1, index=k_index)     # [B, 1, 400]
 			negative = torch.index_select(multi_rep,    dim=1, index=j_index)     # [B, 1, 400]
 
+			# L2 normalization for stability
+			anchor = F.normalize(anchor, p=2, dim=-1)
+			positive = F.normalize(positive, p=2, dim=-1)
+			negative = F.normalize(negative, p=2, dim=-1)
+
 			# anchor . u_k_cf  -> positive logit  [B, 1]
 			positive_logit = torch.matmul(anchor.squeeze(dim=1),
-			                              positive.squeeze(dim=1).transpose(-1, -2))  # [B, 1]
+			                              positive.squeeze(dim=1).transpose(-1, -2)) / self.temp_cf # [B, 1]
 			# anchor . u_j     -> negative logit  [B, 1]
-			negative_logit = torch.matmul(anchor, negative.transpose(-1, -2)).squeeze(dim=2)  # [B, 1]
+			negative_logit = torch.matmul(anchor, negative.transpose(-1, -2)).squeeze(dim=2) / self.temp_cf # [B, 1]
 			logits = torch.cat([positive_logit, negative_logit], dim=-1)   # [B, 2]
 
 		return logits
@@ -341,7 +353,7 @@ class InfoNCE(nn.Module):
 	# constrastive loss using InfoNCE (Noise Contrastive Estimation) between predicted logits and user repr
 
 class Multi_Rep_Predictor(nn.Module):
-	def __init__(self, num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode):
+	def __init__(self, num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode, temp_proto=0.1, temp_cf=0.1):
 		super().__init__()
 		self.news_encoder = News_Encoder(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, dropout_rate)
 		self.attention = MultiHeadAttention(num_head, hid_dim, hid_dim, dropout_rate)
@@ -353,7 +365,7 @@ class Multi_Rep_Predictor(nn.Module):
 		self.agg_mode = agg_mode
 		self.num_prototype = num_prototype
 		self.hid_dim = hid_dim
-		self.infoNCE = InfoNCE(hid_dim, infonce_mode, self.prototype)
+		self.infoNCE = InfoNCE(hid_dim, infonce_mode, self.prototype, temp_proto, temp_cf)
 				
 		self.W = nn.Parameter(torch.Tensor(2 * hid_dim, hid_dim))
 		nn.init.xavier_uniform_(self.W.data, gain = 1.414)

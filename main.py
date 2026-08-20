@@ -35,6 +35,10 @@ if __name__ == '__main__':
                         help='Weight for prototype contrastive loss (used in CF mode)')
     parser.add_argument('--alpha2', type=float, default=1.0,
                         help='Weight for counterfactual contrastive loss (used in CF mode)')
+    parser.add_argument('--temp_proto', type=float, default=0.1,
+                        help='Temperature for prototype contrastive loss')
+    parser.add_argument('--temp_cf', type=float, default=0.1,
+                        help='Temperature for counterfactual contrastive loss')
     parser.add_argument('--num_negative_sample', type=int, default=3)
     parser.add_argument('--word_dim', type=int, default=300)
     parser.add_argument('--preserve_dir', type=str, default='C:/Users/anany/Desktop/Ananya/2023/Estonia Projects/News Recc/MIECL-master')
@@ -145,8 +149,11 @@ if __name__ == '__main__':
     #user_adj = torch.LongTensor(np.array(user_adj, dtype = 'int32'))
     #print ('user_adj.size: ', user_adj.size())
 
+    temp_proto = args.temp_proto
+    temp_cf = args.temp_cf
+
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode)
+    model = Multi_Rep_Predictor(num_head, hid_dim, word_dim, word_matrix, entity_dim, entity_matrix, num_prototype, dropout_rate, multi_rep_mode, infonce_mode, contrastive_mode, gnn_mode, agg_mode, temp_proto, temp_cf)
     model = model.to(device)
     if torch.cuda.is_available():
         model = nn.DataParallel(model)
@@ -234,6 +241,7 @@ if __name__ == '__main__':
                         loss = predictor_loss
                         
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                     optimizer.step()
     
                     loss_per_epoch.append(loss.data.item())
